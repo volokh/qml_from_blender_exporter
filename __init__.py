@@ -31,25 +31,32 @@ bl_info = {
 #    qtquick3d/src/utils/qssgmesh_p.h  (Qt 6.6, FILE_VERSION = 7)
 # ─────────────────────────────────────────────────────────────────
 
-MULTI_FILE_ID = 555777497
-MULTI_FILE_VERSION = 1
+#MULTI_FILE_ID = 555777497
+#MULTI_FILE_VERSION = 1
 MESH_FILE_ID = 3365961549
 MESH_FILE_VERSION = 7
 MESH_FLAGS = 0
-COMPONENT_TYPE_UNSIGNED_INT16 = 4
-COMPONENT_TYPE_UNSIGNED_INT32 = 6
-COMPONENT_TYPE_FLOAT32 = 10
-DRAW_MODE_TRIANGLES = 3
-WINDING_COUNTER_CLOCKWISE = 1
-MESH_HEADER_SIZE = 12
-
-##########
-
 MULTI_MESH_FILE_ID = 555777497    # MultiMeshInfo::FILE_ID
 MULTI_MESH_FILE_VERSION = 1
 MESH_DATA_FILE_ID = 3365961549   # MeshDataHeader::FILE_ID
 # latest (supports morph split, LODs, lightmaps)
 MESH_DATA_FILE_VERSION = 7
+
+COMPONENT_TYPE_UNSIGNED_INT16 = 4
+COMPONENT_TYPE_UNSIGNED_INT32 = 6
+COMPONENT_TYPE_FLOAT32 = 10
+
+DRAW_MODE_TRIANGLES = 7
+DRAW_MODE_LINES = 4
+
+WINDING_CLOCKWISE = 2
+WINDING_COUNTER_CLOCKWISE = 2
+
+MESH_HEADER_SIZE = 12
+
+##########
+
+
 
 # QSSGRenderComponentType enum values
 COMP_UINT16 = 3
@@ -74,11 +81,6 @@ ATTR_WEIGHTS = "attr_weights"
 #  Qt .mesh format constants  (mirrors qssgmesh_p.h / qssgmesh.cpp)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# MULTI_FILE_ID       = 555_777_497
-# MULTI_FILE_VERSION  = 1
-# MESH_FILE_ID        = 3_365_961_549
-# MESH_FILE_VERSION   = 7
-
 MULTI_HEADER_STRUCT_SIZE = 16
 MULTI_ENTRY_STRUCT_SIZE = 16
 MESH_HEADER_STRUCT_SIZE = 12
@@ -86,11 +88,6 @@ MESH_STRUCT_SIZE = 56
 VERTEX_BUFFER_ENTRY_STRUCT_SIZE = 16
 SUBSET_STRUCT_SIZE_V6 = 52
 
-COMP_UINT32 = 4
-COMP_FLOAT32 = 9
-
-DRAW_MODE_TRIANGLES = 4
-WINDING_CCW = 1
 
 ATTR_POS = b"attr_pos"
 ATTR_UV0 = b"attr_uv0"
@@ -286,12 +283,14 @@ def extract_mesh_data(obj, apply_modifiers: bool, convert_coords: bool) -> dict:
     # ── Compute attribute offsets ─────────────────────────────────────────
     pos_off = 0
     stride = 12
-    uv_off = stride if has_uvs else 0xFFFF_FFFF
-    if has_uvs:
-        stride += 8
+
     nrm_off = stride if has_norms else 0xFFFF_FFFF
     if has_norms:
         stride += 12
+
+    uv_off = stride if has_uvs else 0xFFFF_FFFF
+    if has_uvs:
+        stride += 8
 
     # ── Build unique vertices ─────────────────────────────────────────────
     vertex_map: dict = {}
@@ -366,12 +365,13 @@ def extract_mesh_data(obj, apply_modifiers: bool, convert_coords: bool) -> dict:
 
     entries = [{"name": ATTR_POS, "type": COMP_FLOAT32,
                 "count": 3, "offset": pos_off}]
-    if has_uvs:
-        entries.append({"name": ATTR_UV0,  "type": COMP_FLOAT32,
-                       "count": 2, "offset": uv_off})
     if has_norms:
         entries.append({"name": ATTR_NORM, "type": COMP_FLOAT32,
                        "count": 3, "offset": nrm_off})
+
+    if has_uvs:
+        entries.append({"name": ATTR_UV0,  "type": COMP_FLOAT32,
+                       "count": 2, "offset": uv_off})
 
     return {
         "entries":      entries,
@@ -391,7 +391,7 @@ def extract_mesh_data(obj, apply_modifiers: bool, convert_coords: bool) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _write_mesh_body(mesh: dict, subset_name: str) -> bytes:
-    buf = bytearray()
+    #buf = bytearray()
     tracker = _OffsetTracker()
 
     entries = mesh["entries"]
@@ -402,28 +402,47 @@ def _write_mesh_body(mesh: dict, subset_name: str) -> bytes:
     index_count = mesh["index_count"]
     bmin = mesh["bounds_min"]
     bmax = mesh["bounds_max"]
-    n_vb = len(entries)
+    #n_vb = len(entries)
     vsize = len(vbuf)
     isize = len(ibuf)
 
-    def wu32(v): buf.extend(struct.pack("<I", v))
-    def wf32(v): buf.extend(struct.pack("<f", v))
 
     # MESH_STRUCT (56 bytes)
+    body = bytearray()
+    body.extend(struct.pack('<4I', 0, len(entries), stride, 0))
+    body.extend(struct.pack('<4I', vsize, index_type, 0, isize))
+    body.extend(struct.pack('<4I', 0, 1, 0, 0)) # targetCount, subsetsCount, legacy joints
+    body.extend(struct.pack('<2I', DRAW_MODE_TRIANGLES, WINDING_COUNTER_CLOCKWISE))
+    '''
+    body += pack_vertex_entries(entries)
+    body += pack_names(entries)
+    body += vb
+    body += b'\x00' * (align4(len(vb)) - len(vb))
+    body += ib
+    body += b'\x00' * (align4(len(ib)) - len(ib))
+    '''
+    def wu32(v): body.extend(struct.pack("<I", v))
+    def wf32(v): body.extend(struct.pack("<f", v))
+
+    '''
     wu32(0)
     wu32(n_vb)
     wu32(stride)
     wu32(0)
+
     wu32(vsize)
     wu32(index_type)
     wu32(0)
     wu32(isize)
+
     wu32(0)
     wu32(1)            # targetCount, subsetsCount
     wu32(0)
     wu32(0)            # legacy joints
+
     wu32(DRAW_MODE_TRIANGLES)
     wu32(WINDING_CCW)
+    '''
     tracker.advance(MESH_STRUCT_SIZE)
 
     # VB entry structs
@@ -434,24 +453,32 @@ def _write_mesh_body(mesh: dict, subset_name: str) -> bytes:
         wu32(e["count"])
         wu32(e["offset"])
         eb_size += VERTEX_BUFFER_ENTRY_STRUCT_SIZE
-    buf.extend(_pad(tracker.aligned_advance(eb_size)))
+    body.extend(_pad(tracker.aligned_advance(eb_size)))
 
     # VB entry names
     for e in entries:
         raw = e["name"] + b"\x00"
-        buf.extend(struct.pack("<I", len(raw)))
-        buf.extend(raw)
-        buf.extend(_pad(tracker.aligned_advance(4 + len(raw))))
+        body.extend(struct.pack("<I", len(raw)))
+        body.extend(raw)
+        body.extend(_pad(tracker.aligned_advance(4 + len(raw))))
 
     # Vertex buffer
-    buf.extend(vbuf)
-    buf.extend(_pad(tracker.aligned_advance(vsize)))
+    body.extend(vbuf)
+    body.extend(_pad(tracker.aligned_advance(vsize)))
 
     # Index buffer
-    buf.extend(ibuf)
-    buf.extend(_pad(tracker.aligned_advance(isize)))
+    body.extend(ibuf)
+    body.extend(_pad(tracker.aligned_advance(isize)))
 
     # Subset struct V6 (52 bytes)
+    body.extend(struct.pack('<II6fIIIII',
+        index_count, 0,
+        bmin[0], bmin[1], bmin[2],
+        bmax[0], bmax[1], bmax[2],
+        0, len(subset_name) + 1,
+        0, 0, 0)) # lightmapW, lightmapH, lodCount
+
+    '''
     name_len = len(subset_name) + 1
     wu32(index_count)
     wu32(0)
@@ -466,14 +493,15 @@ def _write_mesh_body(mesh: dict, subset_name: str) -> bytes:
     wu32(0)
     wu32(0)
     wu32(0)   # lightmapW, lightmapH, lodCount
-    buf.extend(_pad(tracker.aligned_advance(SUBSET_STRUCT_SIZE_V6)))
+    '''
+    body.extend(_pad(tracker.aligned_advance(SUBSET_STRUCT_SIZE_V6)))
 
     # Subset name (UTF-16-LE)
     name_utf16 = (subset_name + "\x00").encode("utf-16-le")
-    buf.extend(name_utf16)
-    buf.extend(_pad(tracker.aligned_advance(len(name_utf16))))
+    body.extend(name_utf16)
+    body.extend(_pad(tracker.aligned_advance(len(name_utf16))))
 
-    return bytes(buf)
+    return bytes(body)
 
 
 def write_mesh_file(mesh: dict, out_path: str, subset_name: str = "default"):
@@ -482,23 +510,15 @@ def write_mesh_file(mesh: dict, out_path: str, subset_name: str = "default"):
     file_buf = bytearray()
 
     # Mesh data header (12 bytes)
-    file_buf.extend(struct.pack("<I", MESH_FILE_ID))
-    file_buf.extend(struct.pack("<H", MESH_FILE_VERSION))
-    file_buf.extend(struct.pack("<H", 0))
-    file_buf.extend(struct.pack("<I", len(body)))
+    file_buf.extend(struct.pack("<IHHI", MESH_FILE_ID, MESH_FILE_VERSION, 0, len(body)))
     file_buf.extend(body)
 
     # Multi-mesh entry (16 bytes)
     multi_offset = len(file_buf)
-    file_buf.extend(struct.pack("<Q", 0))   # mesh data at offset 0
-    file_buf.extend(struct.pack("<I", 1))   # mesh id = 1
-    file_buf.extend(struct.pack("<I", 0))   # padding
+    file_buf.extend(struct.pack("<QII", 0, 1, 0))   # mesh data at offset 0, mesh id = 1, padding
 
     # Multi-mesh footer (16 bytes)
-    file_buf.extend(struct.pack("<I", MULTI_FILE_ID))
-    file_buf.extend(struct.pack("<I", MULTI_FILE_VERSION))
-    file_buf.extend(struct.pack("<I", multi_offset))
-    file_buf.extend(struct.pack("<I", 1))   # meshCount
+    file_buf.extend(struct.pack("<4I", MULTI_MESH_FILE_ID, MULTI_MESH_FILE_VERSION, multi_offset, 1))   # meshCount
 
     with open(out_path, "wb") as fh:
         fh.write(file_buf)
@@ -605,8 +625,8 @@ def write_mesh_file_(path, vertices, indices, has_normals, has_uv0, bounds_min, 
     header = struct.pack('<IHHI', MESH_FILE_ID, MESH_FILE_VERSION,
                          MESH_FLAGS, MESH_HEADER_SIZE + len(body))
     entry = struct.pack('<QII', 0, 1, 0)
-    file_header = struct.pack('<4I', MULTI_FILE_ID,
-                              MULTI_FILE_VERSION, len(entry), 1)
+    file_header = struct.pack('<4I', MULTI_MESH_FILE_ID,
+                              MULTI_MESH_FILE_VERSION, len(entry), 1)
 
     with open(path, 'wb') as f:
         f.write(header)
@@ -993,6 +1013,8 @@ def mat_qml(mat, img_dir, exported_images, indent=1):
         ior = val('IOR')
         if abs(ior - 1.5) > 0.01:
             out.append(f"{ind1}indexOfRefraction: {ior:.4f}")
+
+    out.append(f"{ind1}cullMode: PrincipledMaterial.NoCulling")
 
     out.append(f"{ind}}}")
     return "\n".join(out)
