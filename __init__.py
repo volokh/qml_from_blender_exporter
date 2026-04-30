@@ -14,6 +14,7 @@ import struct
 import math
 import bmesh
 import bpy
+
 bl_info = {
     "name": "Qt Quick 3D Balsam Exporter",
     "author": "Qt Balsam Exporter Plugin",
@@ -29,10 +30,9 @@ bl_info = {
 #  Qt .mesh binary format constants
 #  Reverse-engineered from:
 #    qtquick3d/src/utils/qssgmesh_p.h  (Qt 6.6, FILE_VERSION = 7)
+#  \sa /opt/Qt/6.11.0/Src/qtquick3d/src/utils/qssgmesh.cpp
 # ─────────────────────────────────────────────────────────────────
 
-#MULTI_FILE_ID = 555777497
-#MULTI_FILE_VERSION = 1
 MESH_FILE_ID = 3365961549
 MESH_FILE_VERSION = 7
 MESH_FLAGS = 0
@@ -57,24 +57,25 @@ MESH_HEADER_SIZE = 12
 ##########
 
 
-
 # QSSGRenderComponentType enum values
+COMP_UINT8 = 1
 COMP_UINT16 = 3
 COMP_UINT32 = 5
+COMP_UINT64 = 7
 COMP_FLOAT32 = 10
 
 LE = '<'   # all little-endian (x86/ARM default)
 
 # Standard Qt Quick 3D vertex attribute names (must match exactly)
-ATTR_POSITION = "attr_pos"
-ATTR_NORMAL = "attr_norm"
-ATTR_UV0 = "attr_uv0"
-ATTR_UV1 = "attr_uv1"
-ATTR_TANGENT = "attr_textan"
-ATTR_BINORMAL = "attr_binormal"
-ATTR_COLOR = "attr_color"
-ATTR_JOINTS = "attr_joints"
-ATTR_WEIGHTS = "attr_weights"
+ATTR_POSITION = b"attr_pos"
+ATTR_NORMAL = b"attr_norm"
+ATTR_UV0 = b"attr_uv0"
+ATTR_UV1 = b"attr_uv1"
+ATTR_TANGENT = b"attr_textan"
+ATTR_BINORMAL = b"attr_binormal"
+ATTR_COLOR = b"attr_color"
+ATTR_JOINTS = b"attr_joints"
+ATTR_WEIGHTS = b"attr_weights"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -89,9 +90,9 @@ VERTEX_BUFFER_ENTRY_STRUCT_SIZE = 16
 SUBSET_STRUCT_SIZE_V6 = 52
 
 
-ATTR_POS = b"attr_pos"
-ATTR_UV0 = b"attr_uv0"
-ATTR_NORM = b"attr_norm"
+# ATTR_POS = b"attr_pos"
+# ATTR_UV0 = b"attr_uv0"
+# ATTR_NORM = b"attr_norm"
 
 _PAD4 = b"\x00\x00\x00\x00"
 # ─────────────────────────────────────────────────────────────────
@@ -238,13 +239,198 @@ def _pad(n: int) -> bytes:
     return _PAD4[:n]
 
 
+# ─────────────────────────────────────────────────────────────────
+#  Common helpers
+# ─────────────────────────────────────────────────────────────────
+
+
+def sanitize(name):
+    s = re.sub(r'[^A-Za-z0-9_]', '_', name)
+    return ('_' + s if s and s[0].isdigit() else s) or '_'
+
+
+def qt_pos(value):
+    value_ = tuple(value)
+    return (value_[0], value_[2], -value_[1])
+
+
+def qt_scale(value):
+    value_ = tuple(value)
+    return (value_[0], value_[2], value_[1])
+
+
+def qt_rot(e): return (math.degrees(e.x),
+                       math.degrees(e.z),
+                       math.degrees(-e.y))
+
+
+def rgba3(c): return f"Qt.rgba({c[0]:.4f}, {c[1]:.4f}, {c[2]:.4f}, 1.0)"
+
+
+def rgba4(c):
+    a = c[3] if len(c) > 3 else 1.0
+    return f"Qt.rgba({c[0]:.4f}, {c[1]:.4f}, {c[2]:.4f}, {a:.4f})"
+
+# def bl_to_qt(x, y, z):
+#    """Blender (X right, Y fwd, Z up)  →  Qt Quick 3D (X right, Y up, -Z fwd)"""
+#    return (x, z, -y)
+
+
+def align4(n):
+    return (n + 3) & ~3
+
+
+# def blender_to_qt_coords(x, y, z):
+#    """Blender Z-up → Qt Y-up coordinate conversion."""
+#    return (x, z, y)
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Mesh geometry extraction from Blender
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _blender_to_qt_coords(x, y, z):
-    """Blender Z-up → Qt Y-up coordinate conversion."""
-    return (x, z, -y)
+
+def collect_mesh(obj, convert_coords):  # , depsgraph, apply_modifiers=True):
+    # eval_obj = obj.evaluated_get(depsgraph) if apply_modifiers else obj
+    mesh = obj.to_mesh()
+    mesh.calc_loop_triangles()
+
+    color_attr = None
+    if hasattr(mesh, "color_attributes") and mesh.color_attributes:
+        preferred = [a for a in mesh.color_attributes if getattr(
+            a, "domain", None) == 'CORNER']
+        color_attr = preferred[0] if preferred else mesh.color_attributes.active_color
+        if color_attr and getattr(color_attr, "domain", None) != 'CORNER':
+            color_attr = None
+    elif hasattr(mesh, "vertex_colors") and mesh.vertex_colors:
+        color_attr = mesh.vertex_colors[0]
+
+    has_color = color_attr is not None
+    uv_layer = mesh.uv_layers.active.data if mesh.uv_layers.active else None
+    has_uv1 = len(mesh.uv_layers) > 1
+    uv1_layer = mesh.uv_layers[1].data if has_uv1 else None
+    col_layer = color_attr.data if color_attr else None
+
+    vbuf = bytearray()
+    vmap = {}
+    vertices = []
+    indices = []
+    bounds_min = [math.inf, math.inf, math.inf]
+    bounds_max = [-math.inf, -math.inf, -math.inf]
+
+    # ── Group faces by material index ─────────────────────────────
+    mat_face_groups = {}
+    for tris in mesh.loop_triangles:
+        mat_face_groups.setdefault(tris.material_index, []).append(tris)
+
+    subsets_data = []
+
+    for mat_idx in sorted(mat_face_groups.keys()):
+        polys = mat_face_groups[mat_idx]
+        subset_start = len(indices)
+        bmin = [math.inf, math.inf, math.inf]
+        bmax = [-math.inf, -math.inf, -math.inf]
+
+        for tri in polys:
+            tri_split_normals = getattr(tri, "split_normals", None)
+            for corner, loop_index in enumerate(tri.loops):
+                loop = mesh.loops[loop_index]
+                vert = mesh.vertices[loop.vertex_index]
+                pos = tuple(vert.co)
+                norm = tuple(loop.normal)
+
+                if tri_split_normals:
+                    norm = tuple(tri_split_normals[corner])
+                elif hasattr(loop, "normal"):
+                    norm = tuple(loop.normal)
+                else:
+                    norm = tuple(vert.normal)
+
+                uv = tuple(uv_layer[loop_index].uv) if uv_layer else (0.0, 0.0)
+
+                if convert_coords:
+                    pos = qt_pos(pos)
+                    norm = qt_pos(norm)
+
+                vdata = pos + norm + uv
+
+                if has_uv1:
+                    uv1 = tuple(uv1_layer[loop_index].uv)
+                    uv1 = (uv1[0], 1.0 - uv1[1])  # flip V
+                    vdata += uv1
+
+                if uv_layer:
+                    tan = tuple(loop.tangent)
+                    tan = qt_pos(tan)
+                    vdata += tan
+
+                if has_color:
+                    col_ = tuple(col_layer[loop_index].color)
+                    if len(col_) >= 4:
+                        col_ = (col_[0], col_[1], col_[2], col_[3])
+                    else:
+                        col_ = (col_[0], col_[1], col_[2], 1.0)
+
+                    vdata += col_
+
+                key = tuple(round(x, 6) for x in vdata)
+                idx = vmap.get(key)
+                if idx is None:
+                    idx = len(vertices)
+                    vmap[key] = idx
+
+                    vbuf.extend(struct.pack("<3f", *pos))
+                    vbuf.extend(struct.pack("<3f", *norm))
+
+                    if uv_layer:
+                        vbuf.extend(struct.pack("<2f", *uv))
+
+                    if has_uv1:
+                        vbuf.extend(struct.pack("<2f", *uv1))
+
+                    if uv_layer:
+                        vbuf.extend(struct.pack("<3f", *tan))
+
+                    if has_color:
+                        vbuf.extend(struct.pack("<4f", *col_))
+
+                    vertices.append({
+                        "pos": pos,
+                        "norm": norm,
+                        "uv": uv,
+                    })
+
+                    for i in range(3):
+                        bounds_min[i] = min(bounds_min[i], pos[i])
+                        bounds_max[i] = max(bounds_max[i], pos[i])
+
+                indices.append(idx)
+                for i in range(3):
+                    bmin[i] = min(bmin[i], pos[i])
+                    bmax[i] = max(bmax[i], pos[i])
+
+        icount = len(indices) - subset_start
+        mat = (obj.material_slots[mat_idx].material if mat_idx < len(
+            obj.material_slots) else None)
+        sname = mat.name if mat else f"subset_{mat_idx}"
+        subsets_data.append({'sname': sname, 'icount': icount,
+                            'subset_start': subset_start, 'bmin': tuple(bmin), 'bmax': tuple(bmax)})
+
+    material_name = mesh.materials[0].name if mesh.materials and mesh.materials[0] else ""
+    has_uv0 = mesh.uv_layers.active is not None
+    has_normals = len(vertices) > 0
+
+    return {'vertices': bytes(vbuf),
+            'vertex_count': len(vertices),
+            'indices': indices,
+            'has_normals': has_normals,
+            'has_uv0': has_uv0,
+            #'bounds_min': tuple(bounds_min),
+            #'bounds_max': tuple(bounds_max),
+            'material_name': material_name,
+            'has_uv1': has_uv1,
+            'has_color': has_color,
+            'subsets_data': subsets_data
+            }
 
 
 def extract_mesh_data(obj, apply_modifiers: bool, convert_coords: bool) -> dict:
@@ -252,16 +438,22 @@ def extract_mesh_data(obj, apply_modifiers: bool, convert_coords: bool) -> dict:
     Triangulate the mesh and build vertex / index buffers.
 
     Returns a dict with keys:
-        entries, stride, vbuf, ibuf, index_type, index_count,
-        vertex_count, bounds_min, bounds_max
+        entries, stride, vbuf, ibuf, index_type, index_count, vertex_count
     """
     # ── Get evaluated (modifier-applied) or raw mesh ──────────────────────
     depsgraph = bpy.context.evaluated_depsgraph_get()
+    eval_obj = obj.evaluated_get(depsgraph) if apply_modifiers else obj
+
+    mesh_ = collect_mesh(eval_obj, convert_coords)
+    '''
     if apply_modifiers:
         eval_obj = obj.evaluated_get(depsgraph)
         me = eval_obj.to_mesh()
     else:
         me = obj.to_mesh()
+    '''
+    '''
+    me = eval_obj.to_mesh()
 
     # ── Triangulate via bmesh ─────────────────────────────────────────────
     bm = bmesh.new()
@@ -279,110 +471,66 @@ def extract_mesh_data(obj, apply_modifiers: bool, convert_coords: bool) -> dict:
         for li in poly.loop_indices:
             loop = me.loops[li]
             split_normals[loop.index] = tuple(loop.normal)
-
+    '''
     # ── Compute attribute offsets ─────────────────────────────────────────
-    pos_off = 0
-    stride = 12
+    entries = []
+    offset = 0
 
-    nrm_off = stride if has_norms else 0xFFFF_FFFF
-    if has_norms:
-        stride += 12
+    def add_attr(name, ncomp):
+        nonlocal offset
+        entries.append({"name": name, "type": COMP_FLOAT32,
+                       "count": ncomp, "offset": offset})
+        # entries.append((name, COMP_FLOAT32, ncomp, offset))
+        offset += ncomp * 4
 
-    uv_off = stride if has_uvs else 0xFFFF_FFFF
-    if has_uvs:
-        stride += 8
+    add_attr(ATTR_POSITION, 3)
+    add_attr(ATTR_NORMAL,   3)
 
-    # ── Build unique vertices ─────────────────────────────────────────────
-    vertex_map: dict = {}
-    vbuf = bytearray()
+    has_uv = mesh_['has_uv0']
+    if has_uv:
+        add_attr(ATTR_UV0, 2)
+
+    has_uv1 = mesh_['has_uv1']
+    if has_uv1:
+        add_attr(ATTR_UV1, 2)
+
+    if has_uv:
+        add_attr(ATTR_TANGENT, 3)
+
+    has_color = mesh_['has_color']
+    if has_color:
+        add_attr(ATTR_COLOR, 3)
+
+    indices_ = mesh_['indices']
+    idx_count_ = len(indices_)
+    # idx_pref_, idx_comp_type_ = ('B', COMP_UINT8)
+    idx_pref_, idx_comp_type_ = (
+        'H', COMP_UINT16)  # if idx_count_ > 0xff else (
+    #    idx_pref_, idx_comp_type_)
+    idx_pref_, idx_comp_type_ = ('I', COMP_UINT32) if idx_count_ > 0xffff else (
+        idx_pref_, idx_comp_type_)
+    idx_pref_, idx_comp_type_ = (
+        'Q', COMP_UINT64) if idx_count_ > 0xffffffff else (idx_pref_, idx_comp_type_)
+
     ibuf = bytearray()
-
-    inf = math.inf
-    min_x, min_y, min_z = inf,  inf,  inf
-    max_x, max_y, max_z = -inf, -inf, -inf
-
-    for face in bm.faces:
-        for loop in face.loops:
-            vert = loop.vert
-            co = vert.co
-            no = loop.calc_normal()
-
-            # Coordinate conversion
-            if convert_coords:
-                px, py, pz = _blender_to_qt_coords(co.x, co.y, co.z)
-                nx, ny, nz = _blender_to_qt_coords(no.x, no.y, no.z)
-            else:
-                px, py, pz = co.x, co.y, co.z
-                nx, ny, nz = no.x, no.y, no.z
-
-            u, v = (0.0, 0.0)
-            if has_uvs and uv_layer:
-                uv_data = loop[uv_layer].uv
-                u = uv_data.x
-                v = 1.0 - uv_data.y   # flip V: Blender=bottom-left, Qt=top-left
-
-            # Quantise to avoid floating-point key collisions
-            key = (
-                round(px, 6), round(py, 6), round(pz, 6),
-                round(nx, 6), round(ny, 6), round(nz, 6),
-                round(u,  6), round(v,  6),
-            )
-
-            if key not in vertex_map:
-                new_idx = len(vertex_map)
-                vertex_map[key] = new_idx
-
-                vbuf += struct.pack("<fff", px, py, pz)
-                if min_x > px:
-                    min_x = px
-                if max_x < px:
-                    max_x = px
-                if min_y > py:
-                    min_y = py
-                if max_y < py:
-                    max_y = py
-                if min_z > pz:
-                    min_z = pz
-                if max_z < pz:
-                    max_z = pz
-
-                if has_uvs:
-                    vbuf += struct.pack("<ff", u, v)
-                if has_norms:
-                    vbuf += struct.pack("<fff", nx, ny, nz)
-
-            ibuf += struct.pack("<I", vertex_map[key])
+    for idx_ in indices_:
+        ibuf.extend(struct.pack(f'<{idx_pref_}', idx_))
 
     # ── Cleanup ───────────────────────────────────────────────────────────
-    bm.free()
     if apply_modifiers:
         eval_obj.to_mesh_clear()
     else:
         obj.to_mesh_clear()
 
-    if not vertex_map:
-        min_x = min_y = min_z = max_x = max_y = max_z = 0.0
-
-    entries = [{"name": ATTR_POS, "type": COMP_FLOAT32,
-                "count": 3, "offset": pos_off}]
-    if has_norms:
-        entries.append({"name": ATTR_NORM, "type": COMP_FLOAT32,
-                       "count": 3, "offset": nrm_off})
-
-    if has_uvs:
-        entries.append({"name": ATTR_UV0,  "type": COMP_FLOAT32,
-                       "count": 2, "offset": uv_off})
-
     return {
         "entries":      entries,
-        "stride":       stride,
-        "vbuf":         bytes(vbuf),
+        "stride":       offset,
+        "vbuf":         mesh_['vertices'],
         "ibuf":         bytes(ibuf),
-        "index_type":   COMP_UINT32,
-        "index_count":  len(ibuf) // 4,
-        "vertex_count": len(vertex_map),
-        "bounds_min":   (min_x, min_y, min_z),
-        "bounds_max":   (max_x, max_y, max_z),
+        "index_type":   idx_comp_type_,
+        "index_count":  idx_count_,
+        "vertex_count": mesh_['vertex_count'],
+        'subsets_data': mesh_['subsets_data'],
     }
 
 
@@ -390,8 +538,8 @@ def extract_mesh_data(obj, apply_modifiers: bool, convert_coords: bool) -> dict:
 #  .mesh file writer  (mirrors MeshInternal::writeMeshData + Mesh::save)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _write_mesh_body(mesh: dict, subset_name: str) -> bytes:
-    #buf = bytearray()
+def _write_mesh_body(mesh: dict) -> bytes:
+    # buf = bytearray()
     tracker = _OffsetTracker()
 
     entries = mesh["entries"]
@@ -400,67 +548,45 @@ def _write_mesh_body(mesh: dict, subset_name: str) -> bytes:
     stride = mesh["stride"]
     index_type = mesh["index_type"]
     index_count = mesh["index_count"]
-    bmin = mesh["bounds_min"]
-    bmax = mesh["bounds_max"]
-    #n_vb = len(entries)
+    subsetsData_ = mesh['subsets_data']
+
+    # n_vb = len(entries)
     vsize = len(vbuf)
     isize = len(ibuf)
 
-
     # MESH_STRUCT (56 bytes)
     body = bytearray()
-    body.extend(struct.pack('<4I', 0, len(entries), stride, 0))
+    targetEntries_ = []
+    targetData_ = []
+    targetCount_ = 0
+    subsetsCount_ = len(subsetsData_)
+    body.extend(struct.pack('<4I', len(targetEntries_),
+                len(entries), stride, len(targetData_)))
     body.extend(struct.pack('<4I', vsize, index_type, 0, isize))
-    body.extend(struct.pack('<4I', 0, 1, 0, 0)) # targetCount, subsetsCount, legacy joints
-    body.extend(struct.pack('<2I', DRAW_MODE_TRIANGLES, WINDING_COUNTER_CLOCKWISE))
-    '''
-    body += pack_vertex_entries(entries)
-    body += pack_names(entries)
-    body += vb
-    body += b'\x00' * (align4(len(vb)) - len(vb))
-    body += ib
-    body += b'\x00' * (align4(len(ib)) - len(ib))
-    '''
-    def wu32(v): body.extend(struct.pack("<I", v))
-    def wf32(v): body.extend(struct.pack("<f", v))
+    # targetCount, subsetsCount, legacy joints
+    body.extend(struct.pack('<4I', targetCount_, subsetsCount_, 0, 0))
+    body.extend(struct.pack('<2I', DRAW_MODE_TRIANGLES,
+                WINDING_COUNTER_CLOCKWISE))
 
-    '''
-    wu32(0)
-    wu32(n_vb)
-    wu32(stride)
-    wu32(0)
+    # def wu32(v): body.extend(struct.pack("<I", v))
+    # def wf32(v): body.extend(struct.pack("<f", v))
 
-    wu32(vsize)
-    wu32(index_type)
-    wu32(0)
-    wu32(isize)
-
-    wu32(0)
-    wu32(1)            # targetCount, subsetsCount
-    wu32(0)
-    wu32(0)            # legacy joints
-
-    wu32(DRAW_MODE_TRIANGLES)
-    wu32(WINDING_CCW)
-    '''
     tracker.advance(MESH_STRUCT_SIZE)
 
     # VB entry structs
     eb_size = 0
     for e in entries:
-        wu32(0)
-        wu32(e["type"])
-        wu32(e["count"])
-        wu32(e["offset"])
+        body.extend(struct.pack("<4I", 0, e["type"], e["count"], e["offset"]))
         eb_size += VERTEX_BUFFER_ENTRY_STRUCT_SIZE
+
     body.extend(_pad(tracker.aligned_advance(eb_size)))
 
     # VB entry names
     for e in entries:
-        raw = e["name"] + b"\x00"
-        body.extend(struct.pack("<I", len(raw)))
-        body.extend(raw)
-        body.extend(_pad(tracker.aligned_advance(4 + len(raw))))
+        entryName_ = e["name"] + b"\x00"
+        body.extend(struct.pack("<I", len(entryName_)))
+        body.extend(entryName_)
+        body.extend(_pad(tracker.aligned_advance(4 + len(entryName_))))
 
     # Vertex buffer
     body.extend(vbuf)
@@ -471,54 +597,55 @@ def _write_mesh_body(mesh: dict, subset_name: str) -> bytes:
     body.extend(_pad(tracker.aligned_advance(isize)))
 
     # Subset struct V6 (52 bytes)
-    body.extend(struct.pack('<II6fIIIII',
-        index_count, 0,
-        bmin[0], bmin[1], bmin[2],
-        bmax[0], bmax[1], bmax[2],
-        0, len(subset_name) + 1,
-        0, 0, 0)) # lightmapW, lightmapH, lodCount
+    subsetByteSize_ = 0
+    for item in subsetsData_:
+        subsetCount_ = item['icount']
+        subsetOffset_ = item['subset_start']
+        subsetName_ = item['sname']
+        lightmapSizeHintWidth_ = 0
+        lightmapSizeHintHeight_ = 0
+        lodCount_ = 0
+        body.extend(struct.pack('<2I', subsetCount_, subsetOffset_))
+        body.extend(struct.pack('<3f', *item['bmin']))
+        body.extend(struct.pack('<3f', *item['bmax']))
+        body.extend(struct.pack('<5I', 0, len(subsetName_) + 1,
+                                lightmapSizeHintWidth_, lightmapSizeHintHeight_, lodCount_))
+        subsetByteSize_ += SUBSET_STRUCT_SIZE_V6
 
-    '''
-    name_len = len(subset_name) + 1
-    wu32(index_count)
-    wu32(0)
-    wf32(bmin[0])
-    wf32(bmin[1])
-    wf32(bmin[2])
-    wf32(bmax[0])
-    wf32(bmax[1])
-    wf32(bmax[2])
-    wu32(0)
-    wu32(name_len)
-    wu32(0)
-    wu32(0)
-    wu32(0)   # lightmapW, lightmapH, lodCount
-    '''
-    body.extend(_pad(tracker.aligned_advance(SUBSET_STRUCT_SIZE_V6)))
+    body.extend(_pad(tracker.aligned_advance(subsetByteSize_)))
 
     # Subset name (UTF-16-LE)
-    name_utf16 = (subset_name + "\x00").encode("utf-16-le")
-    body.extend(name_utf16)
-    body.extend(_pad(tracker.aligned_advance(len(name_utf16))))
+    for item in subsetsData_:
+        subsetName_ = item['sname']
+        name_utf16_ = (subsetName_ + "\x00").encode("utf-16-le")
+        body.extend(name_utf16_)
+        body.extend(_pad(tracker.aligned_advance(len(name_utf16_))))
+
+    # LOD data
+
+    # Data for morphTargets
 
     return bytes(body)
 
 
-def write_mesh_file(mesh: dict, out_path: str, subset_name: str = "default"):
+def write_mesh_file(mesh: dict, out_path: str):
     """Write a complete Qt .mesh file."""
-    body = _write_mesh_body(mesh, subset_name)
+    body = _write_mesh_body(mesh)
     file_buf = bytearray()
 
     # Mesh data header (12 bytes)
-    file_buf.extend(struct.pack("<IHHI", MESH_FILE_ID, MESH_FILE_VERSION, 0, len(body)))
+    file_buf.extend(struct.pack("<IHHI", MESH_FILE_ID,
+                    MESH_FILE_VERSION, 0, len(body)))
     file_buf.extend(body)
 
     # Multi-mesh entry (16 bytes)
     multi_offset = len(file_buf)
-    file_buf.extend(struct.pack("<QII", 0, 1, 0))   # mesh data at offset 0, mesh id = 1, padding
+    # mesh data at offset 0, mesh id = 1, padding
+    file_buf.extend(struct.pack("<QII", 0, 1, 0))
 
     # Multi-mesh footer (16 bytes)
-    file_buf.extend(struct.pack("<4I", MULTI_MESH_FILE_ID, MULTI_MESH_FILE_VERSION, multi_offset, 1))   # meshCount
+    file_buf.extend(struct.pack("<4I", MULTI_MESH_FILE_ID,
+                    MULTI_MESH_FILE_VERSION, multi_offset, 1))   # meshCount
 
     with open(out_path, "wb") as fh:
         fh.write(file_buf)
@@ -527,15 +654,6 @@ def write_mesh_file(mesh: dict, out_path: str, subset_name: str = "default"):
 # ─────────────────────────────────────────────────────────────────
 #  Blender mesh → Qt .mesh
 # ─────────────────────────────────────────────────────────────────
-
-def bl_to_qt(x, y, z):
-    """Blender (X right, Y fwd, Z up)  →  Qt Quick 3D (X right, Y up, -Z fwd)"""
-    return (x, z, -y)
-
-
-def align4(n):
-    return (n + 3) & ~3
-
 
 class VertexEntry:
     def __init__(self, name, component_type, component_count, offset):
@@ -633,64 +751,6 @@ def write_mesh_file_(path, vertices, indices, has_normals, has_uv0, bounds_min, 
         f.write(body)
         f.write(entry)
         f.write(file_header)
-
-
-def collect_mesh(obj, depsgraph, apply_modifiers=True):
-    eval_obj = obj.evaluated_get(depsgraph) if apply_modifiers else obj
-    mesh = eval_obj.to_mesh()
-    mesh.calc_loop_triangles()
-
-    uv_layer = mesh.uv_layers.active.data if mesh.uv_layers.active else None
-    vmap = {}
-    vertices = []
-    indices = []
-    bounds_min = [float('inf'), float('inf'), float('inf')]
-    bounds_max = [float('-inf'), float('-inf'), float('-inf')]
-
-    for tri in mesh.loop_triangles:
-        tri_split_normals = getattr(tri, "split_normals", None)
-
-        for corner, loop_index in enumerate(tri.loops):
-            loop = mesh.loops[loop_index]
-            vert = mesh.vertices[loop.vertex_index]
-            pos = tuple(vert.co)
-
-            if tri_split_normals:
-                norm = tuple(tri_split_normals[corner])
-            elif hasattr(loop, "normal"):
-                norm = tuple(loop.normal)
-            else:
-                norm = tuple(vert.normal)
-
-            uv = tuple(uv_layer[loop_index].uv) if uv_layer else (0.0, 0.0)
-
-            key = (
-                tuple(round(x, 7) for x in pos),
-                tuple(round(x, 7) for x in norm),
-                tuple(round(x, 7) for x in uv),
-            )
-
-            idx = vmap.get(key)
-            if idx is None:
-                idx = len(vertices)
-                vmap[key] = idx
-                vertices.append({
-                    "pos": pos,
-                    "norm": norm,
-                    "uv": uv,
-                })
-                for i in range(3):
-                    bounds_min[i] = min(bounds_min[i], pos[i])
-                    bounds_max[i] = max(bounds_max[i], pos[i])
-
-            indices.append(idx)
-
-    material_name = mesh.materials[0].name if mesh.materials and mesh.materials[0] else ""
-    has_uv0 = mesh.uv_layers.active is not None
-    has_normals = len(vertices) > 0
-
-    eval_obj.to_mesh_clear()
-    return vertices, indices, has_normals, has_uv0, bounds_min, bounds_max, material_name
 
 
 '''
@@ -861,32 +921,6 @@ def extract_and_write_mesh(obj, filepath, apply_modifiers):
     #write_qt_mesh(filepath, vb, stride, attrs, ib, idxcmp, subsets_data)
     return subsets_data
 '''
-
-# ─────────────────────────────────────────────────────────────────
-#  Common helpers
-# ─────────────────────────────────────────────────────────────────
-
-
-def sanitize(name):
-    s = re.sub(r'[^A-Za-z0-9_]', '_', name)
-    return ('_' + s if s and s[0].isdigit() else s) or '_'
-
-
-def qt_pos(v): return (v.x,  v.z, -v.y)
-def qt_scale(v): return (v.x,  v.z,  v.y)
-
-
-def qt_rot(e): return (math.degrees(e.x),
-                       math.degrees(e.z),
-                       math.degrees(-e.y))
-
-
-def rgba3(c): return f"Qt.rgba({c[0]:.4f}, {c[1]:.4f}, {c[2]:.4f}, 1.0)"
-
-
-def rgba4(c):
-    a = c[3] if len(c) > 3 else 1.0
-    return f"Qt.rgba({c[0]:.4f}, {c[1]:.4f}, {c[2]:.4f}, {a:.4f})"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1173,14 +1207,15 @@ class BalsamExporter:
             return False
 
         if mesh_data["vertex_count"] == 0:
-            self.s.report({"WARNING"}, f"'{obj.name}' has no geometry; skipping.")
+            self.s.report(
+                {"WARNING"}, f"'{obj.name}' has no geometry; skipping.")
             return False
 
         mesh_name = bpy.path.clean_name(obj.name)
-        write_mesh_file(mesh_data, filepath, subset_name=mesh_name)
-        self.s.report({"INFO"}, f"  {mesh_data['vertex_count']} verts, "
-            f"{mesh_data['index_count'] // 3} tris → {filepath}"
-        )
+        write_mesh_file(mesh_data, filepath)  # , subset_name=mesh_name)
+        self.s.report({"INFO"}, f"{mesh_data['vertex_count']} verts, "
+                      f"{mesh_data['index_count'] // 3} tris, entries: {len(mesh_data['entries'])} → {filepath}"
+                      )
 
         validate_report_ = qt_mesh_validate(filepath)
         self.s.report({"INFO"}, f'  Mesh validated: {validate_report_}')
@@ -1246,7 +1281,7 @@ class BalsamExporter:
                      f"{I(d+1)}scale: Qt.vector3d{sc}"]
             for child in obj.children:
                 lines.extend(ln for ln in
-                             "\n".join(self._obj_qml(child, d+1)).split("\n"))
+                             "\n".join(self._obj_qml(child, d + 1)).split("\n"))
             lines.append(f"{I(d)}}}")
             blocks.append("\n".join(lines))
             self.s.report({"INFO"}, f'Exporting Node')
@@ -1277,18 +1312,24 @@ class BalsamExporter:
                                    for l in mq.split("\n"))
             mat_section += reindented + "\n\n"
 
-        qml = "\n".join(imports)
+        qml = f"// {stem}.qml\n".join(imports)
         qml += f"\n\n// Qt Quick 3D — exported by Blender Qt Balsam Exporter\n"
         qml += f"// Native .mesh files — no balsam conversion step required\n\n"
-        qml += f"Node {{\n    id: root_{stem}\n    objectName: \"{scene.name}\"\n\n"
+        qml += f"Node {{\n    id: root\n    objectName: '{scene.name}'"
+        if self.s.convert_coords:
+            qml += f"\n    scale: Qt.vector3d(100., 100., 100.)"
+
+        qml += "\n\n"
         if mat_section:
             qml += "    // ── Materials ─────────────────────────────────────────\n"
             qml += mat_section
+
         qml += "    // ── Scene Nodes ───────────────────────────────────────\n"
         qml += "\n".join(node_blocks)
         if anim:
             qml += "\n\n    // ── Animations ────────────────────────────────────\n"
             qml += anim
+
         qml += "\n}\n"
 
         self.qml_path.write_text(qml, encoding='utf-8')
