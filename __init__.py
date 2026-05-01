@@ -5,7 +5,8 @@ from bpy.props import (
 )
 from bpy_extras.io_utils import ExportHelper
 from .qt_mesh_writer import write_qt_quick3d_mesh
-from .qt_mesh_validate import qt_mesh_validate
+from .qt_mesh_validate import validate_qt_mesh
+from .qt_bsdf_mat_importer import principled_bsdf_to_quick3d
 from mathutils import Vector, Euler
 from pathlib import Path
 import re
@@ -14,6 +15,7 @@ import struct
 import math
 import bmesh
 import bpy
+from mathutils import Matrix
 
 bl_info = {
     "name": "Qt Quick 3D Balsam Exporter",
@@ -104,8 +106,33 @@ def _u32(v): return struct.pack(LE + 'I', int(v))
 def _u16(v): return struct.pack(LE + 'H', int(v))
 def _u64(v): return struct.pack(LE + 'Q', int(v))
 def _f32(v): return struct.pack(LE + 'f', float(v))
-def _utf16(s): return s.encode('utf-16-le')
+def _utf16(s): return s.encode('utf-16le')
 
+
+AXIS_FIX = Matrix((
+    (1.0, 0.0, 0.0, 0.0),
+    (0.0, 0.0, 1.0, 0.0),
+    (0.0,-1.0, 0.0, 0.0),
+    (0.0, 0.0, 0.0, 1.0),
+))
+
+def blender_local_matrix(obj):
+    if obj.parent:
+        return obj.parent.matrix_world.inverted() @ obj.matrix_world
+    return obj.matrix_world.copy()
+
+def qt_local_trs(obj, convert_coords=True):
+    m = blender_local_matrix(obj)
+    if convert_coords:
+        m = AXIS_FIX @ m @ AXIS_FIX.inverted()
+
+    loc, rot, scale = m.decompose()
+    eul = rot.to_euler('XYZ')
+    return (
+        (loc.x, loc.y, loc.z),
+        (math.degrees(eul.x), math.degrees(eul.y), math.degrees(eul.z)),
+        (scale.x, scale.y, scale.z),
+    )
 
 # ─────────────────────────────────────────────────────────────────
 #  Qt .mesh binary writer
@@ -256,7 +283,7 @@ def qt_pos(value):
 
 def qt_scale(value):
     value_ = tuple(value)
-    return (value_[0], value_[2], value_[1])
+    return (value_[0], value_[2], -value_[1])
 
 
 def qt_rot(e): return (math.degrees(e.x),
@@ -309,6 +336,7 @@ def collect_mesh(obj, convert_coords):  # , depsgraph, apply_modifiers=True):
     has_uv1 = len(mesh.uv_layers) > 1
     uv1_layer = mesh.uv_layers[1].data if has_uv1 else None
     col_layer = color_attr.data if color_attr else None
+    has_tangent = False # uv_layer != None
 
     vbuf = bytearray()
     vmap = {}
@@ -358,7 +386,7 @@ def collect_mesh(obj, convert_coords):  # , depsgraph, apply_modifiers=True):
                     uv1 = (uv1[0], 1.0 - uv1[1])  # flip V
                     vdata += uv1
 
-                if uv_layer:
+                if has_tangent:
                     tan = tuple(loop.tangent)
                     tan = qt_pos(tan)
                     vdata += tan
@@ -387,7 +415,7 @@ def collect_mesh(obj, convert_coords):  # , depsgraph, apply_modifiers=True):
                     if has_uv1:
                         vbuf.extend(struct.pack("<2f", *uv1))
 
-                    if uv_layer:
+                    if has_tangent:
                         vbuf.extend(struct.pack("<3f", *tan))
 
                     if has_color:
@@ -424,6 +452,7 @@ def collect_mesh(obj, convert_coords):  # , depsgraph, apply_modifiers=True):
             'indices': indices,
             'has_normals': has_normals,
             'has_uv0': has_uv0,
+            'has_tangent': has_tangent,
             #'bounds_min': tuple(bounds_min),
             #'bounds_max': tuple(bounds_max),
             'material_name': material_name,
@@ -494,7 +523,8 @@ def extract_mesh_data(obj, apply_modifiers: bool, convert_coords: bool) -> dict:
     if has_uv1:
         add_attr(ATTR_UV1, 2)
 
-    if has_uv:
+    has_tangent = mesh_['has_tangent']
+    if has_tangent:
         add_attr(ATTR_TANGENT, 3)
 
     has_color = mesh_['has_color']
@@ -617,7 +647,7 @@ def _write_mesh_body(mesh: dict) -> bytes:
     # Subset name (UTF-16-LE)
     for item in subsetsData_:
         subsetName_ = item['sname']
-        name_utf16_ = (subsetName_ + "\x00").encode("utf-16-le")
+        name_utf16_ = (subsetName_ + "\x00").encode("utf-16le")
         body.extend(name_utf16_)
         body.extend(_pad(tracker.aligned_advance(len(name_utf16_))))
 
@@ -963,6 +993,10 @@ def save_image(image, img_dir):
 # ─────────────────────────────────────────────────────────────────
 
 def mat_qml(mat, img_dir, exported_images, indent=1):
+    result_ = principled_bsdf_to_quick3d(mat, img_dir, exported_images, indent)
+    if len(result_) != 0:
+        return result_
+
     ind = "    " * indent
     ind1 = "    " * (indent + 1)
     out = [f"{ind}PrincipledMaterial {{",
@@ -1015,6 +1049,7 @@ def mat_qml(mat, img_dir, exported_images, indent=1):
 
     # Normal map (direct or via Normal Map node)
     nm = tex('Normal')
+    normal_strength_ = 1.
     if not nm:
         ni = bsdf.inputs.get('Normal')
         if ni and ni.links:
@@ -1024,8 +1059,12 @@ def mat_qml(mat, img_dir, exported_images, indent=1):
                 if ci and ci.links:
                     cand = ci.links[0].from_node
                     nm = getattr(cand, 'image', None)
+
+                normal_strength_ = nn.inputs["Strength"].default_value
+
     if nm:
         out.append(f"{ind1}normalMap: {tex_src(nm)}")
+        out.append(f'{ind1}normalStrength: {normal_strength_}')
 
     try_map('Occlusion', 'occlusionMap')
 
@@ -1039,16 +1078,18 @@ def mat_qml(mat, img_dir, exported_images, indent=1):
             out.append(f"{ind1}emissiveFactor: {rgba3(ec)}")
 
     alpha = val('Alpha')
-    if alpha < 0.999:
+    if alpha < 1.:
         out += [f"{ind1}opacity: {alpha:.4f}",
                 f"{ind1}alphaMode: PrincipledMaterial.Blend"]
+    else:
+        out += [f"{ind1}alphaMode: PrincipledMaterial.Opaque"]
+
+    out.append(f"{ind1}cullMode: PrincipledMaterial.NoCulling")
 
     if 'IOR' in bsdf.inputs:
         ior = val('IOR')
         if abs(ior - 1.5) > 0.01:
             out.append(f"{ind1}indexOfRefraction: {ior:.4f}")
-
-    out.append(f"{ind1}cullMode: PrincipledMaterial.NoCulling")
 
     out.append(f"{ind}}}")
     return "\n".join(out)
@@ -1067,12 +1108,14 @@ def light_qml(obj, d=2):
     t = _LIGHT_MAP.get(l.type, 'PointLight')
     ind = "    " * d
     ind1 = "    " * (d+1)
-    pos = qt_pos(obj.location)
-    rot = qt_rot(obj.rotation_euler)
+    pos, rot, sc = qt_local_trs(obj, self.s.convert_coords)
+    #pos = qt_pos(obj.location)
+    #rot = qt_rot(obj.rotation_euler)
     col = l.color
     lines = [f"{ind}{t} {{",
              f'{ind1}objectName: "{obj.name}"',
              f"{ind1}position: Qt.vector3d{pos}",
+             f"{ind1}scale: {sc}",
              f"{ind1}eulerRotation: Qt.vector3d{rot}",
              f"{ind1}color: Qt.rgba({col.r:.4f},{col.g:.4f},{col.b:.4f},1.0)",
              f"{ind1}brightness: {l.energy:.4f}"]
@@ -1089,8 +1132,9 @@ def camera_qml(obj, d=2):
     cam = obj.data
     ind = "    " * d
     ind1 = "    " * (d+1)
-    pos = qt_pos(obj.location)
-    rot = qt_rot(obj.rotation_euler)
+    pos, rot, sc = qt_local_trs(obj, self.s.convert_coords)
+    #pos = qt_pos(obj.location)
+    #rot = qt_rot(obj.rotation_euler)
     if cam.type == 'ORTHO':
         lines = [f"{ind}OrthographicCamera {{",
                  f"{ind1}horizontalMagnification: {cam.ortho_scale:.4f}"]
@@ -1100,6 +1144,7 @@ def camera_qml(obj, d=2):
                  f"{ind1}fieldOfViewOrientation: PerspectiveCamera.Vertical"]
     lines += [f'{ind1}objectName: "{obj.name}"',
               f"{ind1}position: Qt.vector3d{pos}",
+              f"{ind1}scale: {sc}",
               f"{ind1}eulerRotation: Qt.vector3d{rot}",
               f"{ind1}clipNear: {cam.clip_start:.4f}",
               f"{ind1}clipFar: {cam.clip_end:.4f}",
@@ -1217,20 +1262,30 @@ class BalsamExporter:
                       f"{mesh_data['index_count'] // 3} tris, entries: {len(mesh_data['entries'])} → {filepath}"
                       )
 
-        validate_report_ = qt_mesh_validate(filepath)
+        validate_report_ = validate_qt_mesh(filepath)
         self.s.report({"INFO"}, f'  Mesh validated: {validate_report_}')
 
         return True
 
     def _obj_qml(self, obj, d=2):
+        has_renderable_collection = any(
+            not col.hide_render
+            for col in obj.users_collection
+        )
+
+        if obj.hide_render or not has_renderable_collection:
+            return []
+
         blocks = []
         safe = sanitize(obj.name)
         nid = f"node_{safe}"
         self.node_ids[obj.name] = nid
         def I(n): return "    " * n
-        pos = qt_pos(obj.location)
-        rot = qt_rot(obj.rotation_euler)
-        sc = qt_scale(obj.scale)
+
+        pos, rot, sc = qt_local_trs(obj, self.s.convert_coords)
+        #pos = qt_pos(obj.location)
+        #rot = qt_rot(obj.rotation_euler)
+        #sc = qt_scale(obj.scale)
 
         if obj.type == 'MESH':
             if obj.name not in self.exp_meshes:
@@ -1312,7 +1367,7 @@ class BalsamExporter:
                                    for l in mq.split("\n"))
             mat_section += reindented + "\n\n"
 
-        qml = f"// {stem}.qml\n".join(imports)
+        qml = f'// {stem}.qml\n' + '\n'.join(imports)
         qml += f"\n\n// Qt Quick 3D — exported by Blender Qt Balsam Exporter\n"
         qml += f"// Native .mesh files — no balsam conversion step required\n\n"
         qml += f"Node {{\n    id: root\n    objectName: '{scene.name}'"
@@ -1325,7 +1380,10 @@ class BalsamExporter:
             qml += mat_section
 
         qml += "    // ── Scene Nodes ───────────────────────────────────────\n"
+        qml += "    Node {\n"
         qml += "\n".join(node_blocks)
+        qml += "\n    }\n"
+
         if anim:
             qml += "\n\n    // ── Animations ────────────────────────────────────\n"
             qml += anim
@@ -1380,13 +1438,13 @@ class EXPORT_OT_qt_balsam(bpy.types.Operator):
     filter_glob: bpy.props.StringProperty(default="*.qml", options={'HIDDEN'})
 
     export_cameras: bpy.props.BoolProperty(
-        name="Cameras", default=True,
+        name="Cameras", default=False,
         description="Export cameras as Qt camera nodes")
     export_lights: bpy.props.BoolProperty(
-        name="Lights", default=True,
+        name="Lights", default=False,
         description="Export lights as Qt light nodes")
     export_animations: bpy.props.BoolProperty(
-        name="Animations", default=True,
+        name="Animations", default=False,
         description="Export object animations via Timeline/KeyframeGroup")
     apply_modifiers: bpy.props.BoolProperty(
         name="Apply Modifiers", default=True,
