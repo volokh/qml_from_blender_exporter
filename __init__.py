@@ -32,7 +32,7 @@ bl_info = {
 #  Qt .mesh binary format constants
 #  Reverse-engineered from:
 #    qtquick3d/src/utils/qssgmesh_p.h  (Qt 6.6, FILE_VERSION = 7)
-#  \sa /opt/Qt/6.11.0/Src/qtquick3d/src/utils/qssgmesh.cpp
+#  @sa /opt/Qt/6.11.0/Src/qtquick3d/src/utils/qssgmesh.cpp
 # ─────────────────────────────────────────────────────────────────
 
 MESH_FILE_ID = 3365961549
@@ -91,11 +91,6 @@ MESH_STRUCT_SIZE = 56
 VERTEX_BUFFER_ENTRY_STRUCT_SIZE = 16
 SUBSET_STRUCT_SIZE_V6 = 52
 
-
-# ATTR_POS = b"attr_pos"
-# ATTR_UV0 = b"attr_uv0"
-# ATTR_NORM = b"attr_norm"
-
 _PAD4 = b"\x00\x00\x00\x00"
 # ─────────────────────────────────────────────────────────────────
 #  Low-level pack helpers
@@ -112,14 +107,16 @@ def _utf16(s): return s.encode('utf-16le')
 AXIS_FIX = Matrix((
     (1.0, 0.0, 0.0, 0.0),
     (0.0, 0.0, 1.0, 0.0),
-    (0.0,-1.0, 0.0, 0.0),
+    (0.0, -1.0, 0.0, 0.0),
     (0.0, 0.0, 0.0, 1.0),
 ))
+
 
 def blender_local_matrix(obj):
     if obj.parent:
         return obj.parent.matrix_world.inverted() @ obj.matrix_world
     return obj.matrix_world.copy()
+
 
 def qt_local_trs(obj, convert_coords=True):
     m = blender_local_matrix(obj)
@@ -133,114 +130,6 @@ def qt_local_trs(obj, convert_coords=True):
         (math.degrees(eul.x), math.degrees(eul.y), math.degrees(eul.z)),
         (scale.x, scale.y, scale.z),
     )
-
-# ─────────────────────────────────────────────────────────────────
-#  Qt .mesh binary writer
-#  Layout matches qssgmesh.cpp  Mesh::save()
-# ─────────────────────────────────────────────────────────────────
-
-def write_qt_mesh(filepath,
-                  vertex_bytes, stride,
-                  # [(name, comp_type, num_comps, byte_offset), ...]
-                  attributes,
-                  index_bytes, index_comp_type,
-                  subsets):        # [(name, index_count, index_offset, bmin3, bmax3), ...]
-    """Write a Qt Quick 3D native .mesh file (version 7, single mesh)."""
-
-    # ── String table (UTF-16LE) ────────────────────────────────────
-    str_tbl = bytearray()
-
-    def add_str(s):
-        enc = _utf16(s)
-        off = len(str_tbl)
-        str_tbl.extend(enc)
-        return (off, len(s))          # (byte-offset, char-count)
-
-    attr_refs = [add_str(a[0]) for a in attributes]
-    subset_refs = [add_str(s[0]) for s in subsets]
-    str_bytes = bytes(str_tbl)
-
-    # ── Descriptor payload ─────────────────────────────────────────
-    p = bytearray()
-    def w(b): return p.extend(b)
-
-    # VertexBuffer descriptor
-    w(_u32(0))                          # byteOffset  (unused v4+)
-    w(_u32(len(vertex_bytes)))          # byteSize
-    w(_u32(stride))                     # stride
-    w(_u32(len(attributes)))            # entryCount
-    for i, (name, ctype, ncomp, boff) in enumerate(attributes):
-        off_b, nchars = attr_refs[i]
-        w(_u32(off_b))                  # nameOffset (bytes into str table)
-        w(_u32(nchars))                 # nameLength (char count)
-        w(_u32(ctype))                  # componentType
-        w(_u32(ncomp))                  # numComponents
-        w(_u32(boff))                   # firstItemOffset
-        w(_u32(0))                      # padding
-
-    # IndexBuffer descriptor
-    w(_u32(index_comp_type))
-    w(_u32(0))                          # byteOffset (unused)
-    w(_u32(len(index_bytes)))           # byteSize
-
-    # TargetBuffer descriptor (v7, empty – no morph targets here)
-    w(_u32(0))   # numTargets
-    w(_u32(0))   # entryCount
-    w(_u32(0))   # byteOffset
-    w(_u32(0))   # byteSize
-
-    # Subsets
-    w(_u32(len(subsets)))
-    for name, icount, ioff, bmin, bmax in subsets:
-        w(_u32(icount))
-        w(_u32(ioff))
-        for v in bmin:
-            w(_f32(v))
-        for v in bmax:
-            w(_f32(v))
-        w(_u32(0))   # lightmapWidth|Height (v5, two u16 packed, 0=auto)
-        w(_u32(0))   # lodCount (v6, 0 = no LODs)
-
-    # Subset name references
-    for off_b, nchars in subset_refs:
-        w(_u32(off_b))
-        w(_u32(nchars))
-
-    # String table blob (u32 byte-length prefix + data + pad4)
-    w(_u32(len(str_bytes)))
-    w(str_bytes)
-    pad = (-len(str_bytes)) % 4
-    w(bytes(pad))
-
-    # Raw data blobs (each padded to 4 bytes)
-    w(vertex_bytes)
-    w(bytes((-len(vertex_bytes)) % 4))
-    w(index_bytes)
-    w(bytes((-len(index_bytes)) % 4))
-    # No target buffer bytes
-
-    payload = bytes(p)
-
-    # ── MeshDataHeader (12 bytes) ──────────────────────────────────
-    hdr = (_u32(MESH_DATA_FILE_ID) +
-           _u16(MESH_DATA_FILE_VERSION) +
-           _u16(0) +                    # flags
-           _u32(len(payload)))          # sizeInBytes
-    mesh_block = hdr + payload
-    # 8-byte align the mesh block
-    mesh_block += bytes((-len(mesh_block)) % 8)
-
-    # ── MultiMeshInfo outer container (24 bytes) ───────────────────
-    # Structure: fileId(4) fileVersion(4) meshCount(4) meshId(4) byteOffset(8)
-    outer_size = 24
-    outer = (_u32(MULTI_MESH_FILE_ID) +
-             _u32(MULTI_MESH_FILE_VERSION) +
-             _u32(1) +                  # meshCount
-             _u32(1) +                  # meshId = 1
-             _u64(outer_size))          # absolute offset of first mesh block
-
-    with open(filepath, 'wb') as f:
-        f.write(outer + mesh_block)
 
 
 #####
@@ -277,6 +166,9 @@ def sanitize(name):
 
 
 def qt_pos(value):
+    """Blender Z-up → Qt Y-up coordinate conversion."""
+    """Blender (X right, Y fwd, Z up)  →  Qt Quick 3D (X right, Y up, -Z fwd)"""
+
     value_ = tuple(value)
     return (value_[0], value_[2], -value_[1])
 
@@ -298,18 +190,10 @@ def rgba4(c):
     a = c[3] if len(c) > 3 else 1.0
     return f"Qt.rgba({c[0]:.4f}, {c[1]:.4f}, {c[2]:.4f}, {a:.4f})"
 
-# def bl_to_qt(x, y, z):
-#    """Blender (X right, Y fwd, Z up)  →  Qt Quick 3D (X right, Y up, -Z fwd)"""
-#    return (x, z, -y)
-
 
 def align4(n):
     return (n + 3) & ~3
 
-
-# def blender_to_qt_coords(x, y, z):
-#    """Blender Z-up → Qt Y-up coordinate conversion."""
-#    return (x, z, y)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Mesh geometry extraction from Blender
@@ -336,7 +220,7 @@ def collect_mesh(obj, convert_coords):  # , depsgraph, apply_modifiers=True):
     has_uv1 = len(mesh.uv_layers) > 1
     uv1_layer = mesh.uv_layers[1].data if has_uv1 else None
     col_layer = color_attr.data if color_attr else None
-    has_tangent = False # uv_layer != None
+    has_tangent = False  # uv_layer != None
 
     vbuf = bytearray()
     vmap = {}
@@ -453,8 +337,8 @@ def collect_mesh(obj, convert_coords):  # , depsgraph, apply_modifiers=True):
             'has_normals': has_normals,
             'has_uv0': has_uv0,
             'has_tangent': has_tangent,
-            #'bounds_min': tuple(bounds_min),
-            #'bounds_max': tuple(bounds_max),
+            # 'bounds_min': tuple(bounds_min),
+            # 'bounds_max': tuple(bounds_max),
             'material_name': material_name,
             'has_uv1': has_uv1,
             'has_color': has_color,
@@ -783,176 +667,6 @@ def write_mesh_file_(path, vertices, indices, has_normals, has_uv0, bounds_min, 
         f.write(file_header)
 
 
-'''
-def extract_and_write_mesh(obj, filepath, apply_modifiers):
-    """
-    Triangulate object mesh, pack interleaved vertex buffer with:
-      position (3f), normal (3f), uv0 (2f)*, uv1 (2f)*, tangent (3f)*, color (4f)*
-    Write a native Qt .mesh file.
-    Returns list of subset tuples (name, index_count, index_offset, bmin, bmax)
-    which maps 1:1 to Blender material slots.
-    """
-    import bmesh as _bmesh
-
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    #obj_eval  = obj.evaluated_get(depsgraph) if apply_modifiers else obj
-    #mesh      = obj_eval.to_mesh()
-
-
-
-
-
-
-
-    verts, inds, has_normals, has_uv0, bmin, bmax, material_name = collect_mesh(obj, depsgraph, apply_modifiers)
-    print(f'material name: {material_name}')
-    write_mesh_file(filepath, verts, inds, has_normals, has_uv0, bmin, bmax)
-
-
-    return
-    # Triangulate in-memory
-    bm = _bmesh.new()
-    bm.from_mesh(mesh)
-    _bmesh.ops.triangulate(bm, faces=bm.faces)
-    bm.to_mesh(mesh)
-    bm.free()
-
-    has_uv = bool(mesh.uv_layers)
-    has_uv1 = len(mesh.uv_layers) > 1
-
-    color_attr = None
-    if hasattr(mesh, "color_attributes") and mesh.color_attributes:
-        preferred = [a for a in mesh.color_attributes if getattr(a, "domain", None) == 'CORNER']
-        color_attr = preferred[0] if preferred else mesh.color_attributes.active_color
-        if color_attr and getattr(color_attr, "domain", None) != 'CORNER':
-            color_attr = None
-    elif hasattr(mesh, "vertex_colors") and mesh.vertex_colors:
-        color_attr = mesh.vertex_colors[0]
-
-    has_color = color_attr is not None
-
-    if hasattr(mesh, "calc_normals"):
-        mesh.calc_normals()
-    if has_uv and hasattr(mesh, "calc_tangents"):
-        mesh.calc_tangents(uvmap=mesh.uv_layers[0].name)
-
-    # ── Stride and attribute layout ────────────────────────────────
-    attrs  = []   # (name, COMP_FLOAT32, ncomp, byte_offset)
-    offset = 0
-
-    def add_attr(name, ncomp):
-        nonlocal offset
-        attrs.append((name, COMP_FLOAT32, ncomp, offset))
-        offset += ncomp * 4
-
-    add_attr(ATTR_POSITION, 3)
-    add_attr(ATTR_NORMAL,   3)
-    if has_uv:    add_attr(ATTR_UV0,      2)
-    if has_uv1:   add_attr(ATTR_UV1,      2)
-    if has_uv:    add_attr(ATTR_TANGENT,  3)
-    if has_color: add_attr(ATTR_COLOR,    4)
-
-    stride          = offset   # bytes per vertex
-    floats_per_vert = stride // 4
-    pack_fmt        = LE + 'f' * floats_per_vert
-
-    uv_layer  = mesh.uv_layers[0].data if has_uv else None
-    uv1_layer = mesh.uv_layers[1].data if has_uv1 else None
-    col_layer = color_attr.data if has_color else None
-
-    # ── Group faces by material index ─────────────────────────────
-    mat_face_groups = {}
-    for poly in mesh.polygons:
-        mat_face_groups.setdefault(poly.material_index, []).append(poly)
-
-    if not mat_face_groups:
-        obj_eval.to_mesh_clear()
-        return []
-
-    # ── Build vertex + index buffers ──────────────────────────────
-    vert_map  = {}    # tuple → index
-    verts_out = []    # list of float tuples
-    indices   = []    # all indices flat
-
-    subsets_data = []
-
-    for mat_idx in sorted(mat_face_groups.keys()):
-        polys        = mat_face_groups[mat_idx]
-        subset_start = len(indices)
-        bmin = [1e18, 1e18, 1e18]
-        bmax = [-1e18, -1e18, -1e18]
-
-        for poly in polys:
-            for loop_idx in poly.loop_indices:
-                loop  = mesh.loops[loop_idx]
-                vert  = mesh.vertices[loop.vertex_index]
-                co    = vert.co
-                nor   = loop.normal
-
-                px, py, pz = bl_to_qt(co.x, co.y, co.z)
-                nx, ny, nz = bl_to_qt(nor.x, nor.y, nor.z)
-
-                vdata = [px, py, pz, nx, ny, nz]
-
-                if has_uv:
-                    uv = uv_layer[loop_idx].uv
-                    vdata += [uv.x, 1.0 - uv.y]   # flip V
-                if has_uv1:
-                    uv1 = uv1_layer[loop_idx].uv
-                    vdata += [uv1.x, 1.0 - uv1.y]
-                if has_uv:
-                    tan = loop.tangent
-                    tx, ty, tz = bl_to_qt(tan.x, tan.y, tan.z)
-                    vdata += [tx, ty, tz]
-                if has_color:
-                    c = col_layer[loop_idx].color
-                    if len(c) >= 4:
-                        vdata += [c[0], c[1], c[2], c[3]]
-                    else:
-                        vdata += [c[0], c[1], c[2], 1.0]
-
-                key = tuple(round(x, 6) for x in vdata)
-                if key not in vert_map:
-                    vert_map[key] = len(verts_out)
-                    verts_out.append(vdata)
-
-                vi = vert_map[key]
-                indices.append(vi)
-
-                for i, c in enumerate((px, py, pz)):
-                    if c < bmin[i]: bmin[i] = c
-                    if c > bmax[i]: bmax[i] = c
-
-        icount = len(indices) - subset_start
-        mat    = (obj.material_slots[mat_idx].material
-                  if mat_idx < len(obj.material_slots) else None)
-        sname  = mat.name if mat else f"subset_{mat_idx}"
-        subsets_data.append((sname, icount, subset_start,
-                              tuple(bmin), tuple(bmax)))
-
-    obj_eval.to_mesh_clear()
-
-    if not indices:
-        return []
-
-    # ── Pack buffers ───────────────────────────────────────────────
-    vb = b''.join(struct.pack(pack_fmt, *v) for v in verts_out)
-
-    use_u16 = len(verts_out) <= 65535
-    if use_u16:
-        ib     = struct.pack(LE + f'{len(indices)}H', *indices)
-        idxcmp = COMP_UINT16
-    else:
-        ib     = struct.pack(LE + f'{len(indices)}I', *indices)
-        idxcmp = COMP_UINT32
-
-    write_qt_quick3d_mesh(filepath, vb, stride, attrs, ib, idxcmp, subsets_data)
-    #write_mesh(filepath, vb, stride, attrs, ib, idxcmp, subsets_data)
-    #write_qt_mesh(filepath, vb, stride, attrs, ib, idxcmp, subsets_data)
-    return subsets_data
-'''
-
-
 # ─────────────────────────────────────────────────────────────────
 #  Texture export
 # ─────────────────────────────────────────────────────────────────
@@ -1109,8 +823,8 @@ def light_qml(obj, d=2):
     ind = "    " * d
     ind1 = "    " * (d+1)
     pos, rot, sc = qt_local_trs(obj, self.s.convert_coords)
-    #pos = qt_pos(obj.location)
-    #rot = qt_rot(obj.rotation_euler)
+    # pos = qt_pos(obj.location)
+    # rot = qt_rot(obj.rotation_euler)
     col = l.color
     lines = [f"{ind}{t} {{",
              f'{ind1}objectName: "{obj.name}"',
@@ -1133,8 +847,8 @@ def camera_qml(obj, d=2):
     ind = "    " * d
     ind1 = "    " * (d+1)
     pos, rot, sc = qt_local_trs(obj, self.s.convert_coords)
-    #pos = qt_pos(obj.location)
-    #rot = qt_rot(obj.rotation_euler)
+    # pos = qt_pos(obj.location)
+    # rot = qt_rot(obj.rotation_euler)
     if cam.type == 'ORTHO':
         lines = [f"{ind}OrthographicCamera {{",
                  f"{ind1}horizontalMagnification: {cam.ortho_scale:.4f}"]
@@ -1283,9 +997,9 @@ class BalsamExporter:
         def I(n): return "    " * n
 
         pos, rot, sc = qt_local_trs(obj, self.s.convert_coords)
-        #pos = qt_pos(obj.location)
-        #rot = qt_rot(obj.rotation_euler)
-        #sc = qt_scale(obj.scale)
+        # pos = qt_pos(obj.location)
+        # rot = qt_rot(obj.rotation_euler)
+        # sc = qt_scale(obj.scale)
 
         if obj.type == 'MESH':
             if obj.name not in self.exp_meshes:

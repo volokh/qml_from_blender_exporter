@@ -14,6 +14,7 @@ MESH_HEADER_STRUCT_SIZE = 12
 MESH_STRUCT_SIZE = 56
 SUBSET_STRUCT_SIZE_V6 = 52
 
+
 class _OffsetTracker:
     def __init__(self):
         self.counter = 0
@@ -30,11 +31,12 @@ class _OffsetTracker:
     def offset(self):
         return self.counter
 
+
 _PAD4 = b"\x00\x00\x00\x00"
+
 
 def _pad(n: int) -> bytes:
     return _PAD4[:n]
-
 
 
 def align4(n):
@@ -68,17 +70,18 @@ def read_mesh(data, mesh_id, mesh_offset):
     entries = []
     entriesByteSize_ = 0
     for _ in range(vertex_entries):
-        _name_offs, ctype, ccount, eoffs = struct.unpack_from('<4I', data, entriesByteSize_ + tracker.offset())
+        _name_offs, ctype, ccount, eoffs = struct.unpack_from(
+            '<4I', data, entriesByteSize_ + tracker.offset())
         entries.append(
             {'componentType': ctype, 'componentCount': ccount, 'offset': eoffs})
         entriesByteSize_ += VERTEX_BUFFER_ENTRY_STRUCT_SIZE
 
     tracker.aligned_advance(entriesByteSize_)
-    #print(f'tracker: {tracker.offset()} , off: {off}')
+    # print(f'tracker: {tracker.offset()} , off: {off}')
 
     for i in range(vertex_entries):
         name_len = read_u32(data, tracker.offset())
-        tracker.advance(4) # sizeof(quint32)
+        tracker.advance(4)  # sizeof(quint32)
         off_ = tracker.offset()
         namez = data[off_:off_ + name_len]
         tracker.aligned_advance(name_len)
@@ -86,9 +89,9 @@ def read_mesh(data, mesh_id, mesh_offset):
                                    1].decode('ascii', errors='replace') if name_len else ''
         print(f'idx: {i} len: {name_len}, name: {entries[i]["name"]}')
 
-    vertex_data_offset  = tracker.offset()
+    vertex_data_offset = tracker.offset()
     tracker.aligned_advance(vertex_data_size)
-    index_data_offset  = tracker.offset()
+    index_data_offset = tracker.offset()
     tracker.aligned_advance(index_data_size)
 
     subsets = []
@@ -107,7 +110,7 @@ def read_mesh(data, mesh_id, mesh_offset):
         off_ = tracker.offset()
         raw = data[off_:off_ + name_bytes]
         tracker.aligned_advance(name_bytes)
-        #off = mesh_offset + 12 + align4(off - (mesh_offset + 12))
+        # off = mesh_offset + 12 + align4(off - (mesh_offset + 12))
         s['name'] = raw[:-2].decode('utf-16le',
                                     errors='replace') if name_bytes >= 2 else ''
 
@@ -115,8 +118,8 @@ def read_mesh(data, mesh_id, mesh_offset):
         'meshId': mesh_id, 'meshOffset': mesh_offset,
         'meshHeader': {'fileId': mesh_file_id, 'fileVersion': mesh_file_version, 'flags': mesh_flags, 'sizeInBytes': mesh_size},
         'mesh': {'vertexEntries': vertex_entries, 'targetEntries': target_entries, 'stride': stride, 'vertexDataSize': vertex_data_size,
-        'indexComponentType': index_component_type, 'indexDataSize': index_data_size, 'targetCount': target_count, 'subsetCount': subset_count,
-        'drawMode': draw_mode, 'winding': winding, 'vertexDataOffset': vertex_data_offset, 'indexDataOffset': index_data_offset},
+                 'indexComponentType': index_component_type, 'indexDataSize': index_data_size, 'targetCount': target_count, 'subsetCount': subset_count,
+                 'drawMode': draw_mode, 'winding': winding, 'vertexDataOffset': vertex_data_offset, 'indexDataOffset': index_data_offset},
         'attributes': entries,
         'subsets': subsets,
     }
