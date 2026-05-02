@@ -428,7 +428,7 @@ class BalsamExporter:
                        for sl in obj.material_slots if sl.material]
 
             lines = [f"{I(d)}Model {{",
-                     f"{I(d+1)}id: {nid}",
+                     #f"{I(d+1)}id: {nid}",
                      f'{I(d+1)}objectName: "{obj.name}"',
                      f'{I(d+1)}source: "{rel}"',  # qrc:/{rel}
                      f"{I(d+1)}position: Qt.vector3d{pos}",
@@ -455,7 +455,7 @@ class BalsamExporter:
                 #blocks.append("\n".join(lines))
             else:
                 lines = [f"{I(d)}Node {{",
-                         f"{I(d+1)}id: {nid}",
+                         #f"{I(d+1)}id: {nid}",
                          f'{I(d+1)}objectName: "{obj.name}"',
                          f"{I(d+1)}position: Qt.vector3d{pos}",
                          f"{I(d+1)}eulerRotation: Qt.vector3d{rot}",

@@ -93,7 +93,8 @@ def find_upstream_node(socket, node_type, visited=None):
 def image_from_normal_input(normal_input):
     nm = find_upstream_node(normal_input, 'NORMAL_MAP')
     if not nm:
-        return None, None
+        return None, 1.
+
     strength = nm.inputs["Strength"].default_value if "Strength" in nm.inputs else getattr(
         nm, "strength", 1.0)
     color_in = nm.inputs.get("Color")
@@ -102,6 +103,7 @@ def image_from_normal_input(normal_input):
         src = color_in.links[0].from_node
         if getattr(src, "image", None):
             img = src.image
+
     return img, strength
 
 
@@ -260,8 +262,7 @@ def principled_bsdf_to_quick3d(bsdf, mat, img_dir, exported_images, indent=0):
     if normal_img:
         src = tex_source_from_image(normal_img)
         lines.append(f'{ind1}normalMap: Texture {{ source: "{src}" }}')
-        if normal_strength is not None:
-            lines.append(f"{ind1}normalStrength: {float(normal_strength):.6f}")
+        lines.append(f"{ind1}normalStrength: {float(normal_strength):.6f}")
 
     if ao_img:
         src = tex_source_from_image(ao_img)
@@ -334,8 +335,7 @@ def principled_bsdf_to_quick3d(bsdf, mat, img_dir, exported_images, indent=0):
     if clearcoat_normal_img:
         lines.append(
             f'{ind1}clearcoatNormalMap: Texture {{ source: "{tex_source_from_image(clearcoat_normal_img)}" }}')
-
-    lines.append(f"{ind1}clearcoatNormalStrength: {clearcoat_normal_strength}")
+        lines.append(f"{ind1}clearcoatNormalStrength: {clearcoat_normal_strength}")
 
     lines.append(f"{ind1}clearcoatAmount: {clamp01(clearcoat):.6f}")
     lines.append(f"{ind1}clearcoatChannel: PrincipledMaterial.R")

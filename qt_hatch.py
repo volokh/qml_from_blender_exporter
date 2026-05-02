@@ -134,7 +134,7 @@ def qt_pos(value):
 
 def export_qml_hatch(obj, nid, d):
     lines = [f'{I(d)}LM.Hatch {{',
-             f'{I(d+1)}id: {nid}',
+             #f'{I(d+1)}id: {nid}',
              f'{I(d+1)}node: parent',
              f'{I(d+1)}finalRotation: Qt.vector3d{qt_pos(qml_hatch_final_rotation(obj))}',
              f'{I(d)}}}'
