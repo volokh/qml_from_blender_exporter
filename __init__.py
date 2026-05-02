@@ -7,6 +7,7 @@ from bpy_extras.io_utils import ExportHelper
 from .qt_mesh_writer import write_mesh_file, extract_mesh_data
 from .qt_mesh_validate import validate_qt_mesh
 from .qt_bsdf_mat_importer import mat_to_quick3d
+from .qt_hatch import qml_hatch_register, qml_hatch_unregister, is_qml_hatch, export_qml_hatch
 from mathutils import Vector, Euler
 from pathlib import Path
 import re
@@ -18,8 +19,8 @@ import bpy
 from mathutils import Matrix
 
 bl_info = {
-    "name": "Qt Quick 3D Balsam Exporter",
-    "author": "Qt Balsam Exporter Plugin",
+    "name": "Qt Quick 3D Balsam Exporter Plugin",
+    "author": "konvol",
     "version": (2, 1, 0),
     "blender": (4, 4, 0),
     "location": "File > Export > Qt Quick 3D (.qml)",
@@ -448,23 +449,30 @@ class BalsamExporter:
         elif obj.type == 'CAMERA' and self.s.export_cameras:
             blocks.append(camera_qml(obj, d, self.s.convert_coords))
         elif obj.type == 'EMPTY':
-            lines = [f"{I(d)}Node {{",
-                     f"{I(d+1)}id: {nid}",
-                     f'{I(d+1)}objectName: "{obj.name}"',
-                     f"{I(d+1)}position: Qt.vector3d{pos}",
-                     f"{I(d+1)}eulerRotation: Qt.vector3d{rot}",
-                     f"{I(d+1)}scale: Qt.vector3d{sc}"]
-            for child in obj.children:
-                lines.extend(ln for ln in
-                             "\n".join(self._obj_qml(child, d + 1)).split("\n"))
+            lines = []
+            if is_qml_hatch(obj):
+                lines = export_qml_hatch(obj, nid, d)
+                #blocks.append("\n".join(lines))
+            else:
+                lines = [f"{I(d)}Node {{",
+                         f"{I(d+1)}id: {nid}",
+                         f'{I(d+1)}objectName: "{obj.name}"',
+                         f"{I(d+1)}position: Qt.vector3d{pos}",
+                         f"{I(d+1)}eulerRotation: Qt.vector3d{rot}",
+                         f"{I(d+1)}scale: Qt.vector3d{sc}"]
 
-            if obj.instance_type == "COLLECTION" and obj.instance_collection != None:
-                col_offs_ = qt_pos(obj.instance_collection.instance_offset)
-                for cobj in [o for o in obj.instance_collection.objects if o.parent is None]:
+                for child in obj.children:
                     lines.extend(ln for ln in
-                                 "\n".join(self._obj_qml(cobj, d + 1, col_offs_)).split("\n"))
+                                 "\n".join(self._obj_qml(child, d + 1)).split("\n"))
 
-            lines.append(f"{I(d)}}}")
+                if obj.instance_type == "COLLECTION" and obj.instance_collection != None:
+                    col_offs_ = qt_pos(obj.instance_collection.instance_offset)
+                    for cobj in [o for o in obj.instance_collection.objects if o.parent is None]:
+                        lines.extend(ln for ln in
+                                     "\n".join(self._obj_qml(cobj, d + 1, col_offs_)).split("\n"))
+
+                lines.append(f"{I(d)}}}")
+
             blocks.append("\n".join(lines))
 
         return blocks
@@ -483,7 +491,7 @@ class BalsamExporter:
                         d=2) if self.s.export_animations else ""
 
         # ── Assemble QML ──────────────────────────────────────────
-        imports = ["import QtQuick", "import QtQuick3D"]
+        imports = ["import QtQuick", "import QtQuick3D", "", 'import LogicModule as LM']
         if self.s.export_animations:
             imports.append("import QtQuick.Timeline")
 
@@ -618,11 +626,13 @@ def menu_func(self, context):
 def register():
     bpy.utils.register_class(EXPORT_OT_qt_balsam)
     bpy.types.TOPBAR_MT_file_export.append(menu_func)
+    qml_hatch_register()
 
 
 def unregister():
     bpy.utils.unregister_class(EXPORT_OT_qt_balsam)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func)
+    qml_hatch_unregister()
 
 
 if __name__ == "__main__":
