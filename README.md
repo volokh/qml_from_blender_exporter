@@ -9,7 +9,7 @@ Qt's **balsam** asset-import tool, ready to drop into a Qt Quick 3D project.
 
 | Asset type        | Output                                      |
 |-------------------|---------------------------------------------|
-| Meshes            | `meshes/<name>.glb`  (glTF2 binary)         |
+| Meshes            | `meshes/<name>.mesh`  (native format v7)    |
 | Textures / Images | `images/<name>.png`                         |
 | Materials         | Inline `PrincipledMaterial {}` in QML       |
 | Cameras           | `PerspectiveCamera` / `OrthographicCamera`  |
@@ -31,8 +31,8 @@ MyScene/
 ├── CMakeLists_qt3d_snippet.txt
 ├── export_manifest.json
 ├── meshes/
-│   ├── Cube.glb
-│   └── Character.glb
+│   ├── Cube.mesh
+│   └── Character.mesh
 └── images/
     ├── albedo.png
     ├── normal.png
@@ -60,11 +60,12 @@ All sub-directories (`meshes/`, `images/`) are created automatically beside the 
 
 | Option              | Default | Description                                      |
 |---------------------|---------|--------------------------------------------------|
-| Cameras             | ✓       | Export cameras as QML camera nodes               |
-| Lights              | ✓       | Export lights as QML light nodes                 |
-| Animations          | ✓       | Export keyframe animations via Timeline          |
+| Cameras             | ✗       | Export cameras as QML camera nodes               |
+| Lights              | ✗       | Export lights as QML light nodes                 |
+| Animations          | ✗       | Export keyframe animations via Timeline          |
 | Apply Modifiers     | ✓       | Apply mesh modifiers before exporting            |
 | Selected Only       | ✗       | Export only currently selected objects           |
+| Convert (Z → Y)     | ✓       | Convert Z-up to Y-up coordinate system           |
 
 ---
 
@@ -82,8 +83,8 @@ find_package(Qt6 REQUIRED COMPONENTS Quick3D)
 qt6_add_balsam(
     my_target
     FILES
-        assets/meshes/Cube.glb
-        assets/meshes/Character.glb
+        assets/meshes/Cube.mesh
+        assets/meshes/Character.mesh
     OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/assets/meshes
 )
 ```
@@ -95,7 +96,7 @@ qt_add_resources(my_target "scene_assets"
     PREFIX "/"
     FILES
         assets/MyScene.qml
-        assets/meshes/Cube.glb
+        assets/meshes/Cube.mesh
         assets/images/albedo.png
 )
 ```
@@ -126,7 +127,7 @@ View3D {
 The exported QML references meshes as:
 ```qml
 Model {
-    source: "qrc:/meshes/Cube.glb"
+    source: "qrc:/meshes/Cube.mesh"
     ...
 }
 ```
@@ -166,9 +167,8 @@ The plugin automatically converts:
 
 ## Requirements
 
-- Blender 3.0 or newer
-- Qt 6.4 or newer (for full Quick 3D API coverage)
-- The built-in Blender glTF2 exporter (enabled by default)
+- Blender 4.4 or newer
+- Qt 6.11 or newer (for full Quick 3D API coverage)
 
 ---
 

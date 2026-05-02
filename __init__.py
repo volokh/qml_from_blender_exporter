@@ -927,6 +927,28 @@ def anim_qml(scene, node_ids, d=2):
     return "\n".join(lines)
 
 
+def is_linked(obj):
+    if obj is None:
+        return False
+
+    if obj.type == 'MESH':
+        return obj.library is not None or (obj.data and obj.data.library is not None)
+
+    if obj.type == 'EMPTY' and obj.instance_type == 'COLLECTION' and obj.instance_collection:
+        return obj.library is not None or obj.instance_collection.library is not None
+
+    return obj.library is not None
+
+
+def hide_render(obj):
+    has_renderable_collection = any(
+        not col.hide_render
+        for col in obj.users_collection
+    )
+
+    return (obj.hide_render and not is_linked(obj)) or not has_renderable_collection
+
+
 # ─────────────────────────────────────────────────────────────────
 #  Main exporter
 # ─────────────────────────────────────────────────────────────────
@@ -976,18 +998,17 @@ class BalsamExporter:
                       f"{mesh_data['index_count'] // 3} tris, entries: {len(mesh_data['entries'])} → {filepath}"
                       )
 
-        validate_report_ = validate_qt_mesh(filepath)
-        self.s.report({"INFO"}, f'  Mesh validated: {validate_report_}')
+        # validate_report_ = validate_qt_mesh(filepath)
+        # self.s.report({"INFO"}, f'  Mesh validated: {validate_report_}')
 
         return True
 
     def _obj_qml(self, obj, d=2):
-        has_renderable_collection = any(
-            not col.hide_render
-            for col in obj.users_collection
-        )
+        hide_render_ = hide_render(obj)
 
-        if obj.hide_render or not has_renderable_collection:
+        self.s.report({"INFO"}, f"processing object: {obj.name}, type: {obj.type}, instance_type: {obj.instance_type}, has_collection: {obj.instance_collection is not None}, hide_render: {hide_render_}")
+
+        if hide_render_:
             return []
 
         blocks = []
@@ -1030,17 +1051,14 @@ class BalsamExporter:
                 lines.append(f"{I(d+1)}materials: [ {', '.join(mat_ids)} ]")
             for child in obj.children:
                 lines.extend(ln for ln in "\n".join(
-                    self._obj_qml(child, d+1)).split("\n"))
+                    self._obj_qml(child, d + 1)).split("\n"))
             lines.append(f"{I(d)}}}")
             blocks.append("\n".join(lines))
 
         elif obj.type == 'LIGHT' and self.s.export_lights:
             blocks.append(light_qml(obj, d))
-            self.s.report({"INFO"}, f'Exporting light')
         elif obj.type == 'CAMERA' and self.s.export_cameras:
             blocks.append(camera_qml(obj, d))
-            self.s.report({"INFO"}, f'Exporting camera')
-
         elif obj.type == 'EMPTY':
             lines = [f"{I(d)}Node {{",
                      f"{I(d+1)}id: {nid}",
@@ -1051,9 +1069,14 @@ class BalsamExporter:
             for child in obj.children:
                 lines.extend(ln for ln in
                              "\n".join(self._obj_qml(child, d + 1)).split("\n"))
+
+            if obj.instance_type == "COLLECTION" and obj.instance_collection != None:
+                for cobj in [o for o in obj.instance_collection.objects if o.parent is None]:
+                    lines.extend(ln for ln in
+                                 "\n".join(self._obj_qml(cobj, d + 1)).split("\n"))
+
             lines.append(f"{I(d)}}}")
             blocks.append("\n".join(lines))
-            self.s.report({"INFO"}, f'Exporting Node')
 
         return blocks
 
