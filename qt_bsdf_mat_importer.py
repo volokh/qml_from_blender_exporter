@@ -43,10 +43,14 @@ def sanitize(name: str) -> str:
     return ('_' + s if s and s[0].isdigit() else s) or '_'
 
 
+def rgba3(c):
+    return f"Qt.rgba({c[0]:.6f}, {c[1]:.6f}, {c[2]:.6f}, 1.0)"
+
+
 def rgba4(v):
-    if len(v) >= 4:
-        return f"Qt.rgba({v[0]:.6f}, {v[1]:.6f}, {v[2]:.6f}, {v[3]:.6f})"
-    return f"Qt.rgba({v[0]:.6f}, {v[1]:.6f}, {v[2]:.6f}, 1.0)"
+    a = v[3] if len(v) > 3 else 1.0
+    return f"Qt.rgba({v[0]:.6f}, {v[1]:.6f}, {v[2]:.6f}, {a:.6f})"
+    # return f"Qt.rgba({v[0]:.6f}, {v[1]:.6f}, {v[2]:.6f}, 1.0)"
 
 
 def rgb(v):
@@ -115,14 +119,58 @@ def image_from_socket_or_normal_chain(sock):
     return None
 
 
-def principled_bsdf_to_quick3d(mat, img_dir, exported_images, indent=0):
-    if not mat or not mat.use_nodes or not mat.node_tree:
-        return ""
+def node_val(node, name, default=None):
+    def inp(name):
+        return node.inputs.get(name)
 
-    bsdf = next((n for n in mat.node_tree.nodes if n.type ==
-                'BSDF_PRINCIPLED'), None)
-    if not bsdf:
-        return ""
+    s = inp(name)
+    return s.default_value if s is not None else default
+
+
+def transparent_bsdf_to_quick3d(bsdf, mat, img_dir, exported_images, indent=0):
+    ind = "    " * indent
+    ind1 = "    " * (indent + 1)
+    base_color = node_val(bsdf, 'Color', (1.0, 1.0, 1.0, 0.0))
+    out = [f"{ind}PrincipledMaterial {{",
+           f'{ind1}id: mat_{sanitize(mat.name)}',
+           f'{ind1}objectName: "{mat.name}"',
+           f'{ind1}baseColor: {rgba4(base_color)}',
+           f'{ind1}alphaMode: PrincipledMaterial.Blend',
+           # f'{ind1}alphaMode: PrincipledMaterial.Mask',
+           f'{ind1}depthDrawMode: PrincipledMaterial.OpaquePrePassDepthDraw',
+           # f'{ind1}cullMode: Material.NoCulling',
+           f"{ind1}metalness: {mat.metallic:.4f}",
+           f"{ind1}roughness: {mat.roughness:.4f}",
+           f"{ind}}}"]
+    return out
+
+
+def default_to_quick3d(mat, img_dir, exported_images, indent=0):
+    ind = "    " * indent
+    ind1 = "    " * (indent + 1)
+    out = [f"{ind}PrincipledMaterial {{",
+           f'{ind1}id: mat_{sanitize(mat.name)}',
+           f'{ind1}objectName: "{mat.name}"',
+           f'{ind1}baseColor: {rgba4(mat.diffuse_color)}',
+           f'{ind1}alphaMode: PrincipledMaterial.Opaque',
+           f'{ind1}cullMode: Material.NoCulling']
+
+    if not mat.use_nodes:
+        out += [f"{ind1}metalness: {mat.metallic:.4f}",
+                f"{ind1}roughness: {mat.roughness:.4f}"]
+
+    out += [f"{ind}}}"]
+    return out
+
+
+def principled_bsdf_to_quick3d(bsdf, mat, img_dir, exported_images, indent=0):
+    # if not mat or not mat.use_nodes or not mat.node_tree:
+    #    return []
+
+    # bsdf = next((n for n in mat.node_tree.nodes if n.type ==
+    #            'BSDF_PRINCIPLED'), None)
+    # if not bsdf:
+    #    return []
 
     ind = "    " * indent
     ind1 = "    " * (indent + 1)
@@ -311,4 +359,25 @@ def principled_bsdf_to_quick3d(mat, img_dir, exported_images, indent=0):
 
     lines.append(f"{ind1}cullMode: Material.NoCulling")
     lines.append(f"{ind}}}")
-    return "\n".join(lines)
+    return lines  # "\n".join(lines)
+
+
+def mat_to_quick3d(mat, img_dir, exported_images, indent=0):
+    if not mat or not mat.use_nodes or not mat.node_tree:
+        return []
+
+    nodes_ = []
+    for node_ in mat.node_tree.nodes:
+        nodes_.append(
+            f'// type: {node_.type}, id_name: {node_.bl_idname}, id_name: {node_.bl_label}')
+
+    for node in mat.node_tree.nodes:
+        if node.type == 'BSDF_PRINCIPLED':
+            return nodes_ + principled_bsdf_to_quick3d(node, mat, img_dir, exported_images, indent)
+        elif node.type == 'BSDF_TRANSPARENT':
+            return nodes_ + transparent_bsdf_to_quick3d(node, mat, img_dir, exported_images, indent)
+
+    # bsdf = next((n for n in mat.node_tree.nodes if n.type ==
+            # 'BSDF_PRINCIPLED'), None)
+    # if not bsdf:
+    return nodes_ + default_to_quick3d(mat, img_dir, exported_images, indent)
