@@ -363,9 +363,10 @@ class BalsamExporter:
 
     def extract_and_write_mesh(self, obj, filepath):
         self.s.report({"INFO"}, f"Exporting '{obj.name}' → '{filepath}' …")
+        safe = sanitize(obj.name)
 
         try:
-            mesh_data = extract_mesh_data(
+            mesh_data_ = extract_mesh_data(
                 obj,
                 apply_modifiers=self.s.apply_modifiers,
                 convert_coords=self.s.convert_coords,
@@ -374,29 +375,35 @@ class BalsamExporter:
             self.s.report({"ERROR"}, f"Failed to extract '{obj.name}': {exc}")
             return False
 
-        if mesh_data["vertex_count"] == 0:
+        if mesh_data_["vertex_count"] == 0:
             self.s.report(
                 {"WARNING"}, f"'{obj.name}' has no geometry; skipping.")
             return False
 
         mesh_name = bpy.path.clean_name(obj.name)
-        write_mesh_file(mesh_data, filepath)  # , subset_name=mesh_name)
-        self.s.report({"INFO"}, f"{mesh_data['vertex_count']} verts, "
-                      f"{mesh_data['index_count'] // 3} tris, entries: {len(mesh_data['entries'])} → {filepath}"
+        write_mesh_file(mesh_data_, filepath)  # , subset_name=mesh_name)
+        self.s.report({"INFO"}, f"{mesh_data_['vertex_count']} verts, "
+                      f"{mesh_data_['index_count'] // 3} tris, entries: {len(mesh_data_['entries'])} → {filepath}"
                       )
 
         # validate_report_ = validate_qt_mesh(filepath)
         # self.s.report({"INFO"}, f'  Mesh validated: {validate_report_}')
-
+        self.exp_meshes[obj.name] = {
+            'source': f"meshes/{safe}.mesh", 'material_names': mesh_data_['material_names']}
+        # self.exp_meshes[obj.name]['material_names'] = mesh_data_['material_names']
         return True
 
     def _obj_qml(self, obj, d=2, offset=tuple((0, 0, 0))):
-        hide_render_ = hide_render(obj)
+        # hide_render_ = hide_render(obj)
 
-        self.s.report({"INFO"}, f"processing object: {obj.name}, type: {obj.type}, instance_type: {obj.instance_type}, has_collection: {obj.instance_collection is not None}, hide_render: {hide_render_}, offset: {offset}")
+        cols_ = []
+        for col in obj.users_collection:
+            cols_.append(f'{col.name}: {col.hide_render}')
 
-        if hide_render_:
-            return []
+        self.s.report({"INFO"}, f"processing object: {obj.name}, type: {obj.type}, instance_type: {obj.instance_type}, has_collection: {obj.instance_collection is not None}, offset: {offset}, cols: {cols_}")
+
+        # if hide_render_:
+        #    return []
 
         blocks = []
         safe = sanitize(obj.name)
@@ -411,12 +418,14 @@ class BalsamExporter:
         # sc = qt_scale(obj.scale)
 
         if obj.type == 'MESH':
+            # mesh_data_ = []
             if obj.name not in self.exp_meshes:
                 mp = self.mesh_dir / f"{safe}.mesh"
+                # mesh_data_ = self.extract_and_write_mesh(obj, str(mp))
                 if not self.extract_and_write_mesh(obj, str(mp)):
                     return blocks
 
-                self.exp_meshes[obj.name] = f"meshes/{safe}.mesh"
+                # self.exp_meshes[obj.name] = {'source': f"meshes/{safe}.mesh"}
 
             rel = self.exp_meshes[obj.name]
 
@@ -424,13 +433,15 @@ class BalsamExporter:
                 if slot.material:
                     self._ensure_mat(slot.material)
 
-            mat_ids = [f"mat_{sanitize(sl.material.name)}"
-                       for sl in obj.material_slots if sl.material]
+            mat_ids = [f"mat_{sanitize(mat_name_)}"
+                       for mat_name_ in self.exp_meshes[obj.name]['material_names']]
+
+            # mat_ids = self.exp_meshes[obj.name]['material_names']
 
             lines = [f"{I(d)}Model {{",
-                     #f"{I(d+1)}id: {nid}",
+                     # f"{I(d+1)}id: {nid}",
                      f'{I(d+1)}objectName: "{obj.name}"',
-                     f'{I(d+1)}source: "{rel}"',  # qrc:/{rel}
+                     f'{I(d+1)}source: "{rel["source"]}"',  # qrc:/{rel}
                      f"{I(d+1)}position: Qt.vector3d{pos}",
                      f"{I(d+1)}eulerRotation: Qt.vector3d{rot}",
                      f"{I(d+1)}scale: Qt.vector3d{sc}"]
@@ -452,10 +463,10 @@ class BalsamExporter:
             lines = []
             if is_qml_hatch(obj):
                 lines = export_qml_hatch(obj, nid, d)
-                #blocks.append("\n".join(lines))
+                # blocks.append("\n".join(lines))
             else:
                 lines = [f"{I(d)}Node {{",
-                         #f"{I(d+1)}id: {nid}",
+                         # f"{I(d+1)}id: {nid}",
                          f'{I(d+1)}objectName: "{obj.name}"',
                          f"{I(d+1)}position: Qt.vector3d{pos}",
                          f"{I(d+1)}eulerRotation: Qt.vector3d{rot}",
@@ -473,25 +484,47 @@ class BalsamExporter:
 
                 lines.append(f"{I(d)}}}")
 
-            blocks.append("\n".join(lines))
+            if len(lines) > 0:
+                blocks.append("\n".join(lines))
 
         return blocks
+
+    def process_collection(self, collection):
+        objs_ = []
+        node_blocks_ = []
+
+        for child_ in collection.children:
+            if not child_.hide_render:
+                objs_.append(f'ch: {child_.name}')
+                node_blocks_.extend(self.process_collection(child_))
+
+        # self elements in collection
+        for obj_ in collection.objects:
+            if obj_.parent is None and not obj_.hide_render:
+                objs_.append(f'{obj_.name}')
+                node_blocks_.extend(self._obj_qml(obj_, d=2))
+
+        self.s.report({"INFO"}, f'root objs: {objs_}')
+        return node_blocks_
 
     def export(self):
         scene = bpy.context.scene
         stem = sanitize(self.qml_path.stem)
 
         # Process all top-level objects
-        node_blocks = []
-        for obj in [o for o in scene.objects if o.parent is None]:
-            node_blocks.extend(self._obj_qml(obj, d=2))
+        node_blocks = self.process_collection(scene.collection)
+
+        # node_blocks = []
+        # for obj in [o for o in scene.objects if o.parent is None]:
+        #    node_blocks.extend(self._obj_qml(obj, d=2))
 
         # Animation
         anim = anim_qml(scene, self.node_ids,
                         d=2) if self.s.export_animations else ""
 
         # ── Assemble QML ──────────────────────────────────────────
-        imports = ["import QtQuick", "import QtQuick3D", "", 'import LogicModule as LM']
+        imports = ["import QtQuick", "import QtQuick3D",
+                   "", 'import LogicModule as LM']
         if self.s.export_animations:
             imports.append("import QtQuick.Timeline")
 
@@ -527,8 +560,12 @@ class BalsamExporter:
         self.qml_path.write_text(qml, encoding='utf-8')
 
         # ── .qrc ──────────────────────────────────────────────────
+        meshes_sources_ = []
+        for item in self.exp_meshes:
+            meshes_sources_.append(self.exp_meshes[item]['source'])
+
         all_files = ([self.qml_path.name] +
-                     list(self.exp_meshes.values()) +
+                     list(meshes_sources_) +
                      list(self.exp_images.values()))
         qrc = ['<RCC>', '    <qresource prefix="/">']
         for f in sorted(set(all_files)):
@@ -550,7 +587,7 @@ class BalsamExporter:
         # ── Manifest ──────────────────────────────────────────────
         (self.root / "export_manifest.json").write_text(json.dumps({
             "scene": scene.name, "qml": self.qml_path.name,
-            "meshes": self.exp_meshes, "images": self.exp_images,
+            "meshes": meshes_sources_, "images": self.exp_images,
             "materials": list(self.exp_materials.keys()),
         }, indent=2), encoding='utf-8')
 

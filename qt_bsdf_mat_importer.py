@@ -293,7 +293,7 @@ def principled_bsdf_to_quick3d(bsdf, mat, img_dir, exported_images, indent=0):
     if not opacity_img and alpha >= 0.999:
         lines.append(f"{ind1}alphaMode: PrincipledMaterial.Opaque")
     '''
-    if alpha < 0.999 or opacity_img:
+    if alpha < 1. or opacity_img:
         lines.append(f"{ind1}opacity: {alpha:.6f}")
         lines.append(f"{ind1}alphaMode: PrincipledMaterial.Blend")
         # lines.append(f"{ind1}blendMode: PrincipledMaterial.SourceOver")
@@ -309,7 +309,7 @@ def principled_bsdf_to_quick3d(bsdf, mat, img_dir, exported_images, indent=0):
             f'{ind1}opacityMap: Texture {{ source: "{tex_source_from_image(opacity_img)}" }}')
         lines.append(f"{ind1}opacityChannel: PrincipledMaterial.A")
 
-    if transmission > 1e-6:
+    if transmission > 0.:
         lines.append(f"{ind1}transmissionFactor: {transmission:.6f}")
     # lines.append(f"{ind1}transmissionChannel: PrincipledMaterial.R")
 
@@ -335,7 +335,8 @@ def principled_bsdf_to_quick3d(bsdf, mat, img_dir, exported_images, indent=0):
     if clearcoat_normal_img:
         lines.append(
             f'{ind1}clearcoatNormalMap: Texture {{ source: "{tex_source_from_image(clearcoat_normal_img)}" }}')
-        lines.append(f"{ind1}clearcoatNormalStrength: {clearcoat_normal_strength}")
+        lines.append(
+            f"{ind1}clearcoatNormalStrength: {clearcoat_normal_strength}")
 
     lines.append(f"{ind1}clearcoatAmount: {clamp01(clearcoat):.6f}")
     lines.append(f"{ind1}clearcoatChannel: PrincipledMaterial.R")

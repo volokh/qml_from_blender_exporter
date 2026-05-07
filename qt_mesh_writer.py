@@ -372,9 +372,10 @@ def collect_mesh(obj, convert_coords):  # , depsgraph, apply_modifiers=True):
         mat_face_groups.setdefault(tris.material_index, []).append(tris)
 
     subsets_data = []
+    material_names = []
 
-    for mat_idx in sorted(mat_face_groups.keys()):
-        polys = mat_face_groups[mat_idx]
+    for mat_idx_ in sorted(mat_face_groups.keys()):
+        polys = mat_face_groups[mat_idx_]
         subset_start = len(indices)
         bmin = [math.inf, math.inf, math.inf]
         bmax = [-math.inf, -math.inf, -math.inf]
@@ -458,13 +459,16 @@ def collect_mesh(obj, convert_coords):  # , depsgraph, apply_modifiers=True):
                     bmax[i] = max(bmax[i], pos[i])
 
         icount = len(indices) - subset_start
-        mat = (obj.material_slots[mat_idx].material if mat_idx < len(
+        mat = (obj.material_slots[mat_idx_].material if mat_idx_ < len(
             obj.material_slots) else None)
-        sname = mat.name if mat else f"subset_{mat_idx}"
-        subsets_data.append({'sname': sname, 'icount': icount,
-                            'subset_start': subset_start, 'bmin': tuple(bmin), 'bmax': tuple(bmax)})
+        if mat:
+            material_names.append(mat.name)
 
-    material_name = mesh.materials[0].name if mesh.materials and mesh.materials[0] else ""
+        sname = f"subset_{mat_idx_}"
+        subsets_data.append({'sname': sname, 'icount': icount,
+                            'subset_start': subset_start, 'bmin': tuple(bmin), 'bmax': tuple(bmax), 'mat_idx': mat_idx_})
+
+    # material_name = mesh.materials[0].name if mesh.materials and mesh.materials[0] else ""
     has_uv0 = mesh.uv_layers.active is not None
     has_normals = len(vertices) > 0
 
@@ -476,7 +480,8 @@ def collect_mesh(obj, convert_coords):  # , depsgraph, apply_modifiers=True):
             'has_tangent': has_tangent,
             # 'bounds_min': tuple(bounds_min),
             # 'bounds_max': tuple(bounds_max),
-            'material_name': material_name,
+            # 'material_name': material_name,
+            'material_names': material_names,
             'has_uv1': has_uv1,
             'has_color': has_color,
             'subsets_data': subsets_data
@@ -582,6 +587,7 @@ def extract_mesh_data(obj, apply_modifiers: bool, convert_coords: bool) -> dict:
         "index_count":  idx_count_,
         "vertex_count": mesh_['vertex_count'],
         'subsets_data': mesh_['subsets_data'],
+        'material_names': mesh_['material_names'],
     }
 
 
@@ -700,5 +706,3 @@ def write_mesh_file(mesh: dict, out_path: str):
 
     with open(out_path, "wb") as fh:
         fh.write(file_buf)
-
-
